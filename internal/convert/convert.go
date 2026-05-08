@@ -35,17 +35,16 @@ func CreateResponseToMessageWithContext(req openai.CreateResponseRequest, previo
 		maxTokens = *req.MaxOutputTokens
 	}
 	out := anthropic.CreateMessageRequest{
-		Model:                  model,
-		MaxTokens:              maxTokens,
-		Messages:               cloneMessages(previous),
-		System:                 req.Instructions,
-		Temperature:            req.Temperature,
-		TopP:                   req.TopP,
-		Tools:                  convertTools(req.Tools),
-		ToolChoice:             convertToolChoice(req.ToolChoice),
-		DisableParallelToolUse: disableParallel(req.ParallelToolCalls),
-		Stream:                 req.WantsStream(),
+		Model:       model,
+		MaxTokens:   maxTokens,
+		Messages:    cloneMessages(previous),
+		System:      req.Instructions,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Tools:       convertTools(req.Tools),
+		Stream:      req.WantsStream(),
 	}
+	out.ToolChoice = convertToolChoice(req.ToolChoice, req.ParallelToolCalls, len(out.Tools) > 0)
 	inputMessages, err := convertInput(req.Input, ctx)
 	if err != nil {
 		return out, err
@@ -332,19 +331,23 @@ func convertTools(tools []openai.Tool) []anthropic.Tool {
 	return out
 }
 
-func convertToolChoice(raw openai.RawJSON) *anthropic.ToolChoice {
+func convertToolChoice(raw openai.RawJSON, parallelToolCalls *bool, hasTools bool) *anthropic.ToolChoice {
+	disableParallel := disableParallel(parallelToolCalls)
 	if raw.IsZero() {
+		if disableParallel != nil && hasTools {
+			return &anthropic.ToolChoice{Type: "auto", DisableParallelToolUse: disableParallel}
+		}
 		return nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		switch s {
 		case "auto", "any":
-			return &anthropic.ToolChoice{Type: s}
+			return &anthropic.ToolChoice{Type: s, DisableParallelToolUse: disableParallel}
 		case "none":
-			return &anthropic.ToolChoice{Type: "auto"}
+			return &anthropic.ToolChoice{Type: "auto", DisableParallelToolUse: disableParallel}
 		default:
-			return &anthropic.ToolChoice{Type: "auto"}
+			return &anthropic.ToolChoice{Type: "auto", DisableParallelToolUse: disableParallel}
 		}
 	}
 	var obj struct {
@@ -352,16 +355,16 @@ func convertToolChoice(raw openai.RawJSON) *anthropic.ToolChoice {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(raw, &obj); err == nil && obj.Type == "function" && obj.Name != "" {
-		return &anthropic.ToolChoice{Type: "tool", Name: obj.Name}
+		return &anthropic.ToolChoice{Type: "tool", Name: obj.Name, DisableParallelToolUse: disableParallel}
 	}
-	return &anthropic.ToolChoice{Type: "auto"}
+	return &anthropic.ToolChoice{Type: "auto", DisableParallelToolUse: disableParallel}
 }
 
 func disableParallel(v *bool) *bool {
-	if v == nil {
+	if v == nil || *v {
 		return nil
 	}
-	out := !*v
+	out := true
 	return &out
 }
 

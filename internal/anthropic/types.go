@@ -3,16 +3,15 @@ package anthropic
 import "encoding/json"
 
 type CreateMessageRequest struct {
-	Model                  string         `json:"model"`
-	MaxTokens              int            `json:"max_tokens"`
-	Messages               []MessageParam `json:"messages"`
-	System                 string         `json:"system,omitempty"`
-	Stream                 bool           `json:"stream,omitempty"`
-	Temperature            *float64       `json:"temperature,omitempty"`
-	TopP                   *float64       `json:"top_p,omitempty"`
-	Tools                  []Tool         `json:"tools,omitempty"`
-	ToolChoice             *ToolChoice    `json:"tool_choice,omitempty"`
-	DisableParallelToolUse *bool          `json:"disable_parallel_tool_use,omitempty"`
+	Model       string         `json:"model"`
+	MaxTokens   int            `json:"max_tokens"`
+	Messages    []MessageParam `json:"messages"`
+	System      string         `json:"system,omitempty"`
+	Stream      bool           `json:"stream,omitempty"`
+	Temperature *float64       `json:"temperature,omitempty"`
+	TopP        *float64       `json:"top_p,omitempty"`
+	Tools       []Tool         `json:"tools,omitempty"`
+	ToolChoice  *ToolChoice    `json:"tool_choice,omitempty"`
 }
 
 type MessageParam struct {
@@ -45,8 +44,9 @@ type Tool struct {
 }
 
 type ToolChoice struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type MessageResponse struct {

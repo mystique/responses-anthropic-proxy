@@ -1,6 +1,7 @@
 package convert_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -51,8 +52,74 @@ func TestCreateResponseToMessageConvertsCoreFieldsAndTools(t *testing.T) {
 	if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != "lookup" {
 		t.Fatalf("tool choice not mapped: %+v", got.ToolChoice)
 	}
-	if got.DisableParallelToolUse == nil || *got.DisableParallelToolUse != true {
-		t.Fatalf("parallel_tool_calls=false should disable Anthropic parallel tools: %+v", got.DisableParallelToolUse)
+	body, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal(body, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := encoded["disable_parallel_tool_use"]; ok {
+		t.Fatalf("disable_parallel_tool_use must not be a top-level field, got %s", body)
+	}
+	if !bytes.Contains(body, []byte(`"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true}`)) {
+		t.Fatalf("parallel_tool_calls=false should be nested under forced tool_choice, got %s", body)
+	}
+}
+
+func TestCreateResponseToMessageNestsParallelToolDisableInAutoToolChoice(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input:             openai.RawJSON(`"Hello"`),
+		ParallelToolCalls: boolPtr(false),
+		Tools: []openai.Tool{{
+			Type: "function",
+			Name: "lookup",
+		}},
+		ToolChoice: openai.RawJSON(`"auto"`),
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	body, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(`"disable_parallel_tool_use":true,`)) {
+		t.Fatalf("disable_parallel_tool_use must not be a top-level field, got %s", body)
+	}
+	if !bytes.Contains(body, []byte(`"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`)) {
+		t.Fatalf("parallel_tool_calls=false should be nested in tool_choice, got %s", body)
+	}
+}
+
+func TestCreateResponseToMessageOmitsParallelToolDisableWhenParallelAllowed(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input:             openai.RawJSON(`"Hello"`),
+		ParallelToolCalls: boolPtr(true),
+		Tools: []openai.Tool{{
+			Type: "function",
+			Name: "lookup",
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	body, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(`"disable_parallel_tool_use"`)) {
+		t.Fatalf("parallel_tool_calls=true should not send Anthropic disable flag, got %s", body)
+	}
+	if got.ToolChoice != nil {
+		t.Fatalf("parallel_tool_calls=true alone should not add tool_choice, got %+v", got.ToolChoice)
 	}
 }
 
