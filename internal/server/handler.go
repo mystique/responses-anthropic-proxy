@@ -57,6 +57,24 @@ type localErrorContext struct {
 	StoreSnapshot      state.Snapshot                  `json:"store_snapshot"`
 }
 
+var forwardedMetadataHeaders = map[string]struct{}{
+	"user-agent":        {},
+	"x-forwarded-for":   {},
+	"x-forwarded-host":  {},
+	"x-forwarded-port":  {},
+	"x-forwarded-proto": {},
+	"x-real-ip":         {},
+	"x-request-id":      {},
+	"x-correlation-id":  {},
+	"cf-connecting-ip":  {},
+	"cf-ray":            {},
+	"true-client-ip":    {},
+	"forwarded":         {},
+	"traceparent":       {},
+	"tracestate":        {},
+	"baggage":           {},
+}
+
 func New(cfg Config, store *state.Store, httpClient *http.Client) http.Handler {
 	return &Handler{cfg: cfg, store: store, client: anthropic.NewClient(cfg.AnthropicBaseURL, cfg.AnthropicAPIKey, httpClient)}
 }
@@ -202,7 +220,8 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		h.createResponseStream(w, r, req, msgReq, responseID, createdAt, fullTranscript, previous, toolCallIDs, resolvedResponseID, resolvedToolCalls)
 		return
 	}
-	msg, err := h.client.CreateMessage(r.Context(), msgReq)
+	metadataHeaders := upstreamMetadataHeaders(r.Header)
+	msg, err := h.client.CreateMessage(r.Context(), msgReq, metadataHeaders)
 	if err != nil {
 		h.logUpstreamError(err, upstreamErrorContext{
 			ResponseID:         responseID,
@@ -295,7 +314,7 @@ func (h *Handler) cancelStoredResponse(w http.ResponseWriter, id string) {
 }
 
 func (h *Handler) createResponseStream(w http.ResponseWriter, r *http.Request, req openai.CreateResponseRequest, msgReq anthropic.CreateMessageRequest, responseID string, createdAt int64, fullTranscript []anthropic.MessageParam, previous []anthropic.MessageParam, toolCallIDs []string, resolvedResponseID string, resolvedToolCalls map[string]state.ToolCallRecord) {
-	body, err := h.client.CreateMessageStream(r.Context(), msgReq)
+	body, err := h.client.CreateMessageStream(r.Context(), msgReq, upstreamMetadataHeaders(r.Header))
 	if err != nil {
 		h.logUpstreamError(err, upstreamErrorContext{
 			ResponseID:         responseID,
@@ -347,6 +366,19 @@ func (h *Handler) createResponseStream(w http.ResponseWriter, r *http.Request, r
 		h.store.MarkToolCallResolved(resolvedResponseID, callID, createdAt)
 	}
 	h.store.Save(state.ResponseRecord{ID: responseID, Response: resp, Transcript: fullTranscript, Status: resp.Status, CreatedAt: createdAt})
+}
+
+func upstreamMetadataHeaders(src http.Header) http.Header {
+	dst := http.Header{}
+	for name, values := range src {
+		if _, ok := forwardedMetadataHeaders[strings.ToLower(name)]; !ok {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(name, value)
+		}
+	}
+	return dst
 }
 
 func (h *Handler) restorePreviousFromToolCalls(callIDs []string) (state.ResponseRecord, string, bool) {

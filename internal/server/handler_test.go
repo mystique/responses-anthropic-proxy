@@ -67,6 +67,55 @@ func TestResponsesHandlerProxiesNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestResponsesHandlerForwardsClientMetadataHeaders(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("user-agent"); got != "source-client/1.0" {
+			t.Fatalf("expected forwarded user-agent, got %q", got)
+		}
+		if got := r.Header.Get("x-forwarded-for"); got != "203.0.113.10" {
+			t.Fatalf("expected forwarded x-forwarded-for, got %q", got)
+		}
+		if got := r.Header.Get("x-request-id"); got != "req-source" {
+			t.Fatalf("expected forwarded x-request-id, got %q", got)
+		}
+		if got := r.Header.Get("authorization"); got != "" {
+			t.Fatalf("authorization header leaked upstream: %q", got)
+		}
+		if got := r.Header.Get("x-api-key"); got != "anthropic-key" {
+			t.Fatalf("source x-api-key overrode upstream API key: %q", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
+			t.Fatalf("source anthropic-version overrode upstream version: %q", got)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"hello"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req.Header.Set("user-agent", "source-client/1.0")
+	req.Header.Set("x-forwarded-for", "203.0.113.10")
+	req.Header.Set("x-request-id", "req-source")
+	req.Header.Set("authorization", "Bearer source-token")
+	req.Header.Set("x-api-key", "source-key")
+	req.Header.Set("anthropic-version", "2024-01-01")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestResponsesHandlerUsesPreviousResponseIDTranscript(t *testing.T) {
 	var requestBodies []map[string]any
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

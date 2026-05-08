@@ -34,7 +34,7 @@ func NewClient(baseURL, apiKey string, httpClient *http.Client) *Client {
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, http: httpClient}
 }
 
-func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest) (MessageResponse, error) {
+func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest, metadataHeaders http.Header) (MessageResponse, error) {
 	var out MessageResponse
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -44,7 +44,7 @@ func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest) (M
 	if err != nil {
 		return out, err
 	}
-	c.setHeaders(httpReq)
+	c.setHeaders(httpReq, metadataHeaders)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return out, err
@@ -57,7 +57,7 @@ func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest) (M
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
-func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageRequest) (io.ReadCloser, error) {
+func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageRequest, metadataHeaders http.Header) (io.ReadCloser, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -66,7 +66,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageReque
 	if err != nil {
 		return nil, err
 	}
-	c.setHeaders(httpReq)
+	c.setHeaders(httpReq, metadataHeaders)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,12 @@ func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageReque
 	return resp.Body, nil
 }
 
-func (c *Client) setHeaders(req *http.Request) {
+func (c *Client) setHeaders(req *http.Request, metadataHeaders http.Header) {
+	for name, values := range metadataHeaders {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("x-api-key", c.apiKey)
