@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"uni-api/internal/anthropic"
-	"uni-api/internal/openai"
+	"responses-anthropic-proxy/internal/anthropic"
+	"responses-anthropic-proxy/internal/openai"
 )
 
 type ResponseRecord struct {

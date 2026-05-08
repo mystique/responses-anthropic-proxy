@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"uni-api/internal/anthropic"
-	"uni-api/internal/openai"
-	"uni-api/internal/state"
+	"responses-anthropic-proxy/internal/anthropic"
+	"responses-anthropic-proxy/internal/openai"
+	"responses-anthropic-proxy/internal/state"
 )
 
 func TestStoreSavesAndRetrievesTranscript(t *testing.T) {

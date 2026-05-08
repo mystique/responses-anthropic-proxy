@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"uni-api/internal/anthropic"
+	"responses-anthropic-proxy/internal/anthropic"
 )
 
 type toolState struct {
