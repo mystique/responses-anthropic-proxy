@@ -205,7 +205,53 @@ func TestResponsesHandlerRestoresHistoryForUniqueCallIDWithoutPreviousResponseID
 	}
 }
 
+func TestResponsesHandlerAcceptsInlineFunctionCallOutputWithoutPreviousResponseID(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
+	})}
+	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":[
+			{"type":"function_call","call_id":"call_123","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_123","output":"ok"}
+		]
+	}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	messages := upstreamBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("expected inline assistant tool_use plus user tool_result, got %+v", messages)
+	}
+	assistant := messages[0].(map[string]any)
+	user := messages[1].(map[string]any)
+	if assistant["role"] != "assistant" || user["role"] != "user" {
+		t.Fatalf("unexpected message roles: %+v", messages)
+	}
+	toolUse := assistant["content"].([]any)[0].(map[string]any)
+	toolResult := user["content"].([]any)[0].(map[string]any)
+	if toolUse["type"] != "tool_use" || toolUse["id"] != "call_123" || toolResult["tool_use_id"] != "call_123" {
+		t.Fatalf("unexpected tool loop conversion: %+v %+v", toolUse, toolResult)
+	}
+}
+
 func TestResponsesHandlerReturnsLocalErrorForMissingToolCall(t *testing.T) {
+	var logs bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	}()
 	called := false
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		called = true
@@ -226,6 +272,19 @@ func TestResponsesHandlerReturnsLocalErrorForMissingToolCall(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"tool_call_not_found"`) {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+	gotLogs := logs.String()
+	for _, want := range []string{
+		"local_compatibility_error_context",
+		`"code":"tool_call_not_found"`,
+		`"openai_request"`,
+		`"input":[{"type":"function_call_output","call_id":"missing","output":"ok"}]`,
+		`"local_response"`,
+		`"store_snapshot"`,
+	} {
+		if !strings.Contains(gotLogs, want) {
+			t.Fatalf("expected log to contain %s, got:\n%s", want, gotLogs)
+		}
 	}
 }
 

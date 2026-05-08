@@ -44,6 +44,19 @@ type upstreamErrorContext struct {
 	Stream             bool                            `json:"stream"`
 }
 
+type localErrorContext struct {
+	RequestPath        string                          `json:"request_path"`
+	RequestMethod      string                          `json:"request_method"`
+	OpenAIRequest      openai.CreateResponseRequest    `json:"openai_request"`
+	LocalResponse      openai.ErrorResponse            `json:"local_response"`
+	PreviousResponseID string                          `json:"previous_response_id,omitempty"`
+	ResolvedResponseID string                          `json:"resolved_response_id,omitempty"`
+	ToolCallIDs        []string                        `json:"tool_call_ids,omitempty"`
+	ResolvedToolCalls  map[string]state.ToolCallRecord `json:"resolved_tool_calls,omitempty"`
+	PreviousMessages   int                             `json:"previous_messages"`
+	StoreSnapshot      state.Snapshot                  `json:"store_snapshot"`
+}
+
 func New(cfg Config, store *state.Store, httpClient *http.Client) http.Handler {
 	return &Handler{cfg: cfg, store: store, client: anthropic.NewClient(cfg.AnthropicBaseURL, cfg.AnthropicAPIKey, httpClient)}
 }
@@ -75,20 +88,39 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 	resolvedResponseID := req.PreviousResponseID
 	toolCallIDs, err := functionCallOutputIDs(req.Input)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse(err.Error(), "invalid_request_error", "invalid_input"))
+		h.writeLocalError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_input", localErrorContext{
+			RequestPath:   r.URL.Path,
+			RequestMethod: r.Method,
+			OpenAIRequest: req,
+			StoreSnapshot: h.store.Snapshot(),
+		})
 		return
 	}
+	inlineToolCallIDs := inlineFunctionCallIDs(req.Input)
 	if req.PreviousResponseID != "" {
 		record, ok := h.store.Get(req.PreviousResponseID)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse("previous_response_id not found", "invalid_request_error", "previous_response_not_found"))
+			h.writeLocalError(w, http.StatusBadRequest, "previous_response_id not found", "invalid_request_error", "previous_response_not_found", localErrorContext{
+				RequestPath:        r.URL.Path,
+				RequestMethod:      r.Method,
+				OpenAIRequest:      req,
+				PreviousResponseID: req.PreviousResponseID,
+				ToolCallIDs:        toolCallIDs,
+				StoreSnapshot:      h.store.Snapshot(),
+			})
 			return
 		}
 		previous = record.Transcript
-	} else if len(toolCallIDs) > 0 {
+	} else if len(toolCallIDs) > 0 && !allToolCallsInline(toolCallIDs, inlineToolCallIDs) {
 		record, code, ok := h.restorePreviousFromToolCalls(toolCallIDs)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse(toolCallErrorMessage(code), "invalid_request_error", code))
+			h.writeLocalError(w, http.StatusBadRequest, toolCallErrorMessage(code), "invalid_request_error", code, localErrorContext{
+				RequestPath:   r.URL.Path,
+				RequestMethod: r.Method,
+				OpenAIRequest: req,
+				ToolCallIDs:   toolCallIDs,
+				StoreSnapshot: h.store.Snapshot(),
+			})
 			return
 		}
 		resolvedResponseID = record.ID
@@ -96,13 +128,41 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedToolCalls := map[string]state.ToolCallRecord{}
 	for _, callID := range toolCallIDs {
+		if inlineToolCallIDs[callID] {
+			resolvedToolCalls[callID] = state.ToolCallRecord{
+				OpenAICallID:       callID,
+				AnthropicToolUseID: callID,
+				ResponseID:         resolvedResponseID,
+			}
+			continue
+		}
 		record, ok := h.store.FindToolCall(resolvedResponseID, callID)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse("tool call not found", "invalid_request_error", "tool_call_not_found"))
+			h.writeLocalError(w, http.StatusBadRequest, "tool call not found", "invalid_request_error", "tool_call_not_found", localErrorContext{
+				RequestPath:        r.URL.Path,
+				RequestMethod:      r.Method,
+				OpenAIRequest:      req,
+				PreviousResponseID: req.PreviousResponseID,
+				ResolvedResponseID: resolvedResponseID,
+				ToolCallIDs:        toolCallIDs,
+				ResolvedToolCalls:  resolvedToolCalls,
+				PreviousMessages:   len(previous),
+				StoreSnapshot:      h.store.Snapshot(),
+			})
 			return
 		}
 		if record.ResolvedAt != 0 {
-			writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse("tool call already resolved", "invalid_request_error", "tool_call_already_resolved"))
+			h.writeLocalError(w, http.StatusBadRequest, "tool call already resolved", "invalid_request_error", "tool_call_already_resolved", localErrorContext{
+				RequestPath:        r.URL.Path,
+				RequestMethod:      r.Method,
+				OpenAIRequest:      req,
+				PreviousResponseID: req.PreviousResponseID,
+				ResolvedResponseID: resolvedResponseID,
+				ToolCallIDs:        toolCallIDs,
+				ResolvedToolCalls:  resolvedToolCalls,
+				PreviousMessages:   len(previous),
+				StoreSnapshot:      h.store.Snapshot(),
+			})
 			return
 		}
 		resolvedToolCalls[callID] = record
@@ -122,7 +182,17 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &inputErr) && inputErr.Code != "" {
 			code = inputErr.Code
 		}
-		writeJSON(w, http.StatusBadRequest, openai.NewErrorResponse(err.Error(), "invalid_request_error", code))
+		h.writeLocalError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", code, localErrorContext{
+			RequestPath:        r.URL.Path,
+			RequestMethod:      r.Method,
+			OpenAIRequest:      req,
+			PreviousResponseID: req.PreviousResponseID,
+			ResolvedResponseID: resolvedResponseID,
+			ToolCallIDs:        toolCallIDs,
+			ResolvedToolCalls:  resolvedToolCalls,
+			PreviousMessages:   len(previous),
+			StoreSnapshot:      h.store.Snapshot(),
+		})
 		return
 	}
 	responseID := newResponseID()
@@ -333,6 +403,38 @@ func functionCallOutputIDs(raw openai.RawJSON) ([]string, error) {
 	return ids, nil
 }
 
+func inlineFunctionCallIDs(raw openai.RawJSON) map[string]bool {
+	ids := map[string]bool{}
+	if raw.IsZero() {
+		return ids
+	}
+	var items []struct {
+		Type   string `json:"type"`
+		CallID string `json:"call_id"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return ids
+	}
+	for _, item := range items {
+		if item.Type == "function_call" && item.CallID != "" {
+			ids[item.CallID] = true
+		}
+	}
+	return ids
+}
+
+func allToolCallsInline(callIDs []string, inline map[string]bool) bool {
+	if len(callIDs) == 0 {
+		return false
+	}
+	for _, callID := range callIDs {
+		if !inline[callID] {
+			return false
+		}
+	}
+	return true
+}
+
 func toolCallErrorMessage(code string) string {
 	switch code {
 	case "ambiguous_tool_call_id":
@@ -368,6 +470,30 @@ func (h *Handler) logUpstreamError(err error, ctx upstreamErrorContext) {
 	b, marshalErr := json.Marshal(payload)
 	if marshalErr != nil {
 		log.Printf("upstream_error_context marshal_error=%q error=%q response_id=%q", marshalErr.Error(), err.Error(), ctx.ResponseID)
+		return
+	}
+	log.Printf("%s", b)
+}
+
+func (h *Handler) writeLocalError(w http.ResponseWriter, status int, message, typ, code string, ctx localErrorContext) {
+	resp := openai.NewErrorResponse(message, typ, code)
+	ctx.LocalResponse = resp
+	ctx.StoreSnapshot = h.store.Snapshot()
+	h.logLocalError(ctx)
+	writeJSON(w, status, resp)
+}
+
+func (h *Handler) logLocalError(ctx localErrorContext) {
+	payload := struct {
+		Event string `json:"event"`
+		localErrorContext
+	}{
+		Event:             "local_compatibility_error_context",
+		localErrorContext: ctx,
+	}
+	b, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		log.Printf("local_compatibility_error_context marshal_error=%q code=%q", marshalErr.Error(), ctx.LocalResponse.Error.Code)
 		return
 	}
 	log.Printf("%s", b)

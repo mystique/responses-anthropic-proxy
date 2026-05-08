@@ -125,6 +125,39 @@ func TestBridgeToolUseStream(t *testing.T) {
 	}
 }
 
+func TestBridgeToolUseStreamSynthesizesMissingToolUseID(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"lookup","input":{}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"abc\"}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n"))
+	var output bytes.Buffer
+
+	got, err := stream.BridgeWithResult(input, &output, "resp_1", 111)
+	if err != nil {
+		t.Fatalf("BridgeWithResult returned error: %v", err)
+	}
+
+	if len(got.Content) != 1 || got.Content[0].ID == "" {
+		t.Fatalf("expected synthesized tool_use id, got %+v", got.Content)
+	}
+	if got.Content[0].ID != "resp_1_tool_1" {
+		t.Fatalf("unexpected synthesized tool_use id: %q", got.Content[0].ID)
+	}
+	if !strings.Contains(output.String(), `"call_id":"resp_1_tool_1"`) {
+		t.Fatalf("stream output did not use synthesized call id:\n%s", output.String())
+	}
+}
+
 func TestBridgeWithResultReturnsAssistantTranscript(t *testing.T) {
 	input := strings.NewReader(strings.Join([]string{
 		`event: content_block_start`,

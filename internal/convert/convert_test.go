@@ -132,6 +132,39 @@ func TestFunctionCallOutputContentListConvertsSupportedBlocks(t *testing.T) {
 	}
 }
 
+func TestInlineFunctionCallAndOutputConvertToAssistantToolUseThenToolResult(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[
+			{"type":"function_call","call_id":"call_123","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_123","output":"ok"}
+		]`),
+	}
+
+	got, err := convert.CreateResponseToMessageWithContext(req, nil, "claude-test", convert.Context{
+		ToolResolver: func(callID string) (string, bool) {
+			if callID == "call_123" {
+				return "call_123", true
+			}
+			return "", false
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	if len(got.Messages) != 2 {
+		t.Fatalf("expected assistant tool_use and user tool_result messages, got %+v", got.Messages)
+	}
+	toolUse := got.Messages[0].Content[0]
+	if got.Messages[0].Role != "assistant" || toolUse.Type != "tool_use" || toolUse.ID != "call_123" || toolUse.Name != "exec_command" || string(toolUse.Input) != `{"cmd":"pwd"}` {
+		t.Fatalf("unexpected inline tool_use conversion: %+v", got.Messages[0])
+	}
+	toolResult := got.Messages[1].Content[0]
+	if got.Messages[1].Role != "user" || toolResult.Type != "tool_result" || toolResult.ToolUseID != "call_123" || toolResult.Content != "ok" {
+		t.Fatalf("unexpected inline tool_result conversion: %+v", got.Messages[1])
+	}
+}
+
 func TestMessageToResponseConvertsTextToolUseAndStatus(t *testing.T) {
 	msg := anthropic.MessageResponse{
 		ID:         "msg_123",
@@ -166,6 +199,32 @@ func TestMessageToResponseConvertsTextToolUseAndStatus(t *testing.T) {
 	}
 	if len(transcript) != 1 || transcript[0].Role != "assistant" || len(transcript[0].Content) != 2 {
 		t.Fatalf("unexpected transcript: %+v", transcript)
+	}
+}
+
+func TestMessageToResponseSynthesizesMissingToolUseID(t *testing.T) {
+	msg := anthropic.MessageResponse{
+		ID:         "msg_123",
+		Model:      "claude-test",
+		Role:       "assistant",
+		StopReason: "tool_use",
+		Content: []anthropic.ContentBlock{{
+			Type:  "tool_use",
+			Name:  "lookup",
+			Input: json.RawMessage(`{"q":"abc"}`),
+		}},
+	}
+
+	got, transcript, err := convert.MessageToResponse(msg, "resp_123", 111)
+	if err != nil {
+		t.Fatalf("MessageToResponse returned error: %v", err)
+	}
+
+	if len(got.Output) != 1 || got.Output[0].CallID != "resp_123_tool_0" {
+		t.Fatalf("expected synthesized call id, got %+v", got.Output)
+	}
+	if transcript[0].Content[0].ID != "resp_123_tool_0" {
+		t.Fatalf("expected transcript to use synthesized id: %+v", transcript)
 	}
 }
 

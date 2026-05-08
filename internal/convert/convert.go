@@ -73,15 +73,20 @@ func MessageToResponse(msg anthropic.MessageResponse, responseID string, created
 				Content: []openai.ContentItem{{Type: "output_text", Text: block.Text, Annotations: []any{}}},
 			})
 		case "tool_use":
+			toolUseID := block.ID
+			if toolUseID == "" {
+				toolUseID = fmt.Sprintf("%s_tool_%d", responseID, i)
+				msg.Content[i].ID = toolUseID
+			}
 			args := string(block.Input)
 			if args == "" {
 				args = "{}"
 			}
 			resp.Output = append(resp.Output, openai.OutputItem{
-				ID:        block.ID,
+				ID:        toolUseID,
 				Type:      "function_call",
 				Status:    "completed",
-				CallID:    block.ID,
+				CallID:    toolUseID,
 				Name:      block.Name,
 				Arguments: args,
 			})
@@ -139,6 +144,13 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 				role = "user"
 			}
 			messages = append(messages, anthropic.MessageParam{Role: role, Content: blocks})
+		case "function_call":
+			flushUser()
+			block, err := convertFunctionCall(item)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, anthropic.MessageParam{Role: "assistant", Content: []anthropic.ContentBlock{block}})
 		case "input_text":
 			pendingUser = append(pendingUser, anthropic.ContentBlock{Type: "text", Text: item.Text})
 		case "input_image":
@@ -156,13 +168,15 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 }
 
 type inputItem struct {
-	Type     string        `json:"type"`
-	Role     string        `json:"role,omitempty"`
-	Content  []contentItem `json:"content,omitempty"`
-	Text     string        `json:"text,omitempty"`
-	ImageURL string        `json:"image_url,omitempty"`
-	CallID   string        `json:"call_id,omitempty"`
-	Output   any           `json:"output,omitempty"`
+	Type      string        `json:"type"`
+	Role      string        `json:"role,omitempty"`
+	Content   []contentItem `json:"content,omitempty"`
+	Text      string        `json:"text,omitempty"`
+	ImageURL  string        `json:"image_url,omitempty"`
+	CallID    string        `json:"call_id,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	Arguments string        `json:"arguments,omitempty"`
+	Output    any           `json:"output,omitempty"`
 }
 
 type contentItem struct {
@@ -198,6 +212,23 @@ func convertFunctionCallOutput(item inputItem, ctx Context) (anthropic.ContentBl
 		return anthropic.ContentBlock{}, err
 	}
 	return anthropic.ContentBlock{Type: "tool_result", ToolUseID: toolUseID, Content: content}, nil
+}
+
+func convertFunctionCall(item inputItem) (anthropic.ContentBlock, error) {
+	if item.CallID == "" {
+		return anthropic.ContentBlock{}, &InputError{Message: "function_call missing call_id", Code: "tool_call_not_found"}
+	}
+	if item.Name == "" {
+		return anthropic.ContentBlock{}, &InputError{Message: "function_call missing name", Code: "invalid_tool_call"}
+	}
+	args := strings.TrimSpace(item.Arguments)
+	if args == "" {
+		args = "{}"
+	}
+	if !json.Valid([]byte(args)) {
+		return anthropic.ContentBlock{}, &InputError{Message: "function_call arguments must be valid JSON", Code: "invalid_tool_call_arguments"}
+	}
+	return anthropic.ContentBlock{Type: "tool_use", ID: item.CallID, Name: item.Name, Input: json.RawMessage(args)}, nil
 }
 
 func convertToolResultContent(raw any) (any, error) {

@@ -27,6 +27,21 @@ type ToolCallRecord struct {
 	ResolvedAt         int64
 }
 
+type Snapshot struct {
+	Responses []ResponseSummary `json:"responses"`
+	ToolCalls []ToolCallRecord  `json:"tool_calls"`
+}
+
+type ResponseSummary struct {
+	ID               string   `json:"id"`
+	Status           string   `json:"status"`
+	CreatedAt        int64    `json:"created_at"`
+	OutputTypes      []string `json:"output_types,omitempty"`
+	ToolCallIDs      []string `json:"tool_call_ids,omitempty"`
+	TranscriptRoles  []string `json:"transcript_roles,omitempty"`
+	TranscriptBlocks []int    `json:"transcript_blocks,omitempty"`
+}
+
 type Store struct {
 	mu        sync.RWMutex
 	ttl       time.Duration
@@ -140,6 +155,41 @@ func (s *Store) MarkToolCallResolved(responseID, callID string, resolvedAt int64
 	record.ResolvedAt = resolvedAt
 	byCall[callID] = record
 	return true
+}
+
+func (s *Store) Snapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot := Snapshot{
+		Responses: make([]ResponseSummary, 0, len(s.records)),
+	}
+	for _, record := range s.records {
+		summary := ResponseSummary{
+			ID:               record.ID,
+			Status:           record.Status,
+			CreatedAt:        record.CreatedAt,
+			OutputTypes:      make([]string, 0, len(record.Response.Output)),
+			TranscriptRoles:  make([]string, 0, len(record.Transcript)),
+			TranscriptBlocks: make([]int, 0, len(record.Transcript)),
+		}
+		for _, item := range record.Response.Output {
+			summary.OutputTypes = append(summary.OutputTypes, item.Type)
+			if item.Type == "function_call" && item.CallID != "" {
+				summary.ToolCallIDs = append(summary.ToolCallIDs, item.CallID)
+			}
+		}
+		for _, msg := range record.Transcript {
+			summary.TranscriptRoles = append(summary.TranscriptRoles, msg.Role)
+			summary.TranscriptBlocks = append(summary.TranscriptBlocks, len(msg.Content))
+		}
+		snapshot.Responses = append(snapshot.Responses, summary)
+	}
+	for _, byCall := range s.toolCalls {
+		for _, record := range byCall {
+			snapshot.ToolCalls = append(snapshot.ToolCalls, record)
+		}
+	}
+	return snapshot
 }
 
 func (s *Store) indexToolCallsLocked(record ResponseRecord) {

@@ -109,7 +109,11 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 			}
 		}
 		if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
-			state := &toolState{ID: event.ContentBlock.ID, Name: event.ContentBlock.Name}
+			id := event.ContentBlock.ID
+			if id == "" {
+				id = fmt.Sprintf("%s_tool_%d", responseID, event.Index)
+			}
+			state := &toolState{ID: id, Name: event.ContentBlock.Name}
 			tools[event.Index] = state
 			return blocks, writeEvent(w, map[string]any{
 				"type":         "response.output_item.added",
