@@ -165,6 +165,42 @@ func TestInlineFunctionCallAndOutputConvertToAssistantToolUseThenToolResult(t *t
 	}
 }
 
+func TestMultipleInlineFunctionCallsStayInOneAssistantMessage(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call","call_id":"call_2","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"pwd ok"},
+			{"type":"function_call_output","call_id":"call_2","output":"ls ok"}
+		]`),
+	}
+
+	got, err := convert.CreateResponseToMessageWithContext(req, nil, "claude-test", convert.Context{
+		ToolResolver: func(callID string) (string, bool) {
+			return callID, callID == "call_1" || callID == "call_2"
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	if len(got.Messages) != 2 {
+		t.Fatalf("expected one assistant message followed by one user message, got %+v", got.Messages)
+	}
+	if got.Messages[0].Role != "assistant" || len(got.Messages[0].Content) != 2 {
+		t.Fatalf("expected both tool calls in one assistant message, got %+v", got.Messages[0])
+	}
+	if got.Messages[0].Content[0].ID != "call_1" || got.Messages[0].Content[1].ID != "call_2" {
+		t.Fatalf("tool call order changed: %+v", got.Messages[0].Content)
+	}
+	if got.Messages[1].Role != "user" || len(got.Messages[1].Content) != 2 {
+		t.Fatalf("expected both tool results in one user message, got %+v", got.Messages[1])
+	}
+	if got.Messages[1].Content[0].ToolUseID != "call_1" || got.Messages[1].Content[1].ToolUseID != "call_2" {
+		t.Fatalf("tool result order changed: %+v", got.Messages[1].Content)
+	}
+}
+
 func TestMessageToResponseConvertsTextToolUseAndStatus(t *testing.T) {
 	msg := anthropic.MessageResponse{
 		ID:         "msg_123",

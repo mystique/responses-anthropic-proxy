@@ -126,7 +126,14 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 		return nil, fmt.Errorf("unsupported input: %w", err)
 	}
 	var messages []anthropic.MessageParam
+	var pendingAssistant []anthropic.ContentBlock
 	var pendingUser []anthropic.ContentBlock
+	flushAssistant := func() {
+		if len(pendingAssistant) > 0 {
+			messages = append(messages, anthropic.MessageParam{Role: "assistant", Content: pendingAssistant})
+			pendingAssistant = nil
+		}
+	}
 	flushUser := func() {
 		if len(pendingUser) > 0 {
 			pendingUser = orderToolResultsFirst(pendingUser)
@@ -137,6 +144,7 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 	for _, item := range items {
 		switch item.Type {
 		case "message":
+			flushAssistant()
 			flushUser()
 			blocks := convertContentItems(item.Content)
 			role := item.Role
@@ -150,12 +158,15 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 			if err != nil {
 				return nil, err
 			}
-			messages = append(messages, anthropic.MessageParam{Role: "assistant", Content: []anthropic.ContentBlock{block}})
+			pendingAssistant = append(pendingAssistant, block)
 		case "input_text":
+			flushAssistant()
 			pendingUser = append(pendingUser, anthropic.ContentBlock{Type: "text", Text: item.Text})
 		case "input_image":
+			flushAssistant()
 			pendingUser = append(pendingUser, convertImage(item))
 		case "function_call_output":
+			flushAssistant()
 			block, err := convertFunctionCallOutput(item, ctx)
 			if err != nil {
 				return nil, err
@@ -163,6 +174,7 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 			pendingUser = append(pendingUser, block)
 		}
 	}
+	flushAssistant()
 	flushUser()
 	return messages, nil
 }

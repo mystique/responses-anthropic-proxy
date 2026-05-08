@@ -242,6 +242,52 @@ func TestResponsesHandlerAcceptsInlineFunctionCallOutputWithoutPreviousResponseI
 	}
 }
 
+func TestResponsesHandlerKeepsMultipleInlineFunctionCallsAdjacentToResults(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
+	})}
+	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call","call_id":"call_2","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"pwd ok"},
+			{"type":"function_call_output","call_id":"call_2","output":"ls ok"}
+		]
+	}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	messages := upstreamBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("expected one assistant tool_use message plus one user tool_result message, got %+v", messages)
+	}
+	assistant := messages[0].(map[string]any)
+	user := messages[1].(map[string]any)
+	toolUses := assistant["content"].([]any)
+	toolResults := user["content"].([]any)
+	if assistant["role"] != "assistant" || len(toolUses) != 2 {
+		t.Fatalf("expected two tool uses in one assistant message, got %+v", assistant)
+	}
+	if user["role"] != "user" || len(toolResults) != 2 {
+		t.Fatalf("expected two tool results in one user message, got %+v", user)
+	}
+	firstUse := toolUses[0].(map[string]any)
+	secondUse := toolUses[1].(map[string]any)
+	firstResult := toolResults[0].(map[string]any)
+	secondResult := toolResults[1].(map[string]any)
+	if firstUse["id"] != "call_1" || secondUse["id"] != "call_2" || firstResult["tool_use_id"] != "call_1" || secondResult["tool_use_id"] != "call_2" {
+		t.Fatalf("unexpected tool call/result pairing: %+v %+v", assistant, user)
+	}
+}
+
 func TestResponsesHandlerReturnsLocalErrorForMissingToolCall(t *testing.T) {
 	var logs bytes.Buffer
 	origWriter := log.Writer()
