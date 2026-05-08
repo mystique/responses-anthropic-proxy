@@ -106,6 +106,12 @@ type ErrorResponse struct {
 	Error ErrorObject `json:"error"`
 }
 
+type DeleteResponse struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Deleted bool   `json:"deleted"`
+}
+
 type ErrorObject struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`

@@ -28,7 +28,7 @@ type ContentBlock struct {
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
+	Content   any             `json:"content,omitempty"`
 }
 
 type ImageSource struct {

@@ -2,6 +2,7 @@ package convert_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"uni-api/internal/anthropic"
@@ -58,11 +59,19 @@ func TestCreateResponseToMessageConvertsCoreFieldsAndTools(t *testing.T) {
 func TestFunctionCallOutputConvertsToToolResult(t *testing.T) {
 	req := openai.CreateResponseRequest{
 		Input: openai.RawJSON(`[
-			{"type":"function_call_output","call_id":"toolu_123","output":"{\"ok\":true}"}
+			{"type":"function_call_output","call_id":"call_123","output":"{\"ok\":true}"},
+			{"type":"input_text","text":"next"}
 		]`),
 	}
 
-	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	got, err := convert.CreateResponseToMessageWithContext(req, nil, "claude-test", convert.Context{
+		ToolResolver: func(callID string) (string, bool) {
+			if callID == "call_123" {
+				return "toolu_123", true
+			}
+			return "", false
+		},
+	})
 	if err != nil {
 		t.Fatalf("CreateResponseToMessage returned error: %v", err)
 	}
@@ -73,6 +82,53 @@ func TestFunctionCallOutputConvertsToToolResult(t *testing.T) {
 	block := got.Messages[0].Content[0]
 	if block.Type != "tool_result" || block.ToolUseID != "toolu_123" || block.Content != "{\"ok\":true}" {
 		t.Fatalf("function_call_output not converted to tool_result: %+v", block)
+	}
+	if got.Messages[0].Content[1].Type != "text" {
+		t.Fatalf("tool_result should be ordered before text: %+v", got.Messages[0].Content)
+	}
+}
+
+func TestFunctionCallOutputResolverMissReturnsToolCallNotFound(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[{"type":"function_call_output","call_id":"call_missing","output":"{}"}]`),
+	}
+
+	_, err := convert.CreateResponseToMessageWithContext(req, nil, "claude-test", convert.Context{
+		ToolResolver: func(string) (string, bool) { return "", false },
+	})
+
+	var inputErr *convert.InputError
+	if err == nil || !errors.As(err, &inputErr) {
+		t.Fatalf("expected InputError, got %T %v", err, err)
+	}
+	if inputErr.Code != "tool_call_not_found" {
+		t.Fatalf("unexpected error code: %q", inputErr.Code)
+	}
+}
+
+func TestFunctionCallOutputContentListConvertsSupportedBlocks(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[
+			{"type":"function_call_output","call_id":"call_123","output":[
+				{"type":"output_text","text":"ok"},
+				{"type":"input_image","image_url":"https://example.test/a.png"}
+			]}
+		]`),
+	}
+
+	got, err := convert.CreateResponseToMessageWithContext(req, nil, "claude-test", convert.Context{
+		ToolResolver: func(string) (string, bool) { return "toolu_123", true },
+	})
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	content, ok := got.Messages[0].Content[0].Content.([]anthropic.ContentBlock)
+	if !ok {
+		t.Fatalf("expected content block list, got %T", got.Messages[0].Content[0].Content)
+	}
+	if len(content) != 2 || content[0].Type != "text" || content[0].Text != "ok" || content[1].Type != "image" {
+		t.Fatalf("unexpected tool_result content: %+v", content)
 	}
 }
 

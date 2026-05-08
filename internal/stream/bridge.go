@@ -16,6 +16,11 @@ type toolState struct {
 	Arguments strings.Builder
 }
 
+type textState struct {
+	ID   string
+	Text strings.Builder
+}
+
 func Bridge(r io.Reader, w io.Writer, responseID string, createdAt int64) error {
 	_, err := BridgeWithResult(r, w, responseID, createdAt)
 	return err
@@ -29,7 +34,7 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 		return anthropic.MessageParam{}, err
 	}
 	tools := map[int]*toolState{}
-	text := map[int]*strings.Builder{}
+	text := map[int]*textState{}
 	var blocks []anthropic.ContentBlock
 	scanner := bufio.NewScanner(r)
 	var dataLines []string
@@ -61,7 +66,7 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 	return anthropic.MessageParam{Role: "assistant", Content: blocks}, nil
 }
 
-func handleSSEData(w io.Writer, responseID string, createdAt int64, data string, tools map[int]*toolState, text map[int]*strings.Builder, blocks []anthropic.ContentBlock) ([]anthropic.ContentBlock, error) {
+func handleSSEData(w io.Writer, responseID string, createdAt int64, data string, tools map[int]*toolState, text map[int]*textState, blocks []anthropic.ContentBlock) ([]anthropic.ContentBlock, error) {
 	if strings.TrimSpace(data) == "" || strings.TrimSpace(data) == "[DONE]" {
 		return blocks, nil
 	}
@@ -72,10 +77,53 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 	switch event.Type {
 	case "content_block_start":
 		if event.ContentBlock != nil && event.ContentBlock.Type == "text" {
-			text[event.Index] = &strings.Builder{}
+			state := &textState{ID: fmt.Sprintf("%s_msg_%d", responseID, event.Index)}
+			text[event.Index] = state
+			if err := writeEvent(w, map[string]any{
+				"type":         "response.output_item.added",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":      state.ID,
+					"type":    "message",
+					"status":  "in_progress",
+					"role":    "assistant",
+					"content": []any{},
+				},
+			}); err != nil {
+				return blocks, err
+			}
+			if err := writeEvent(w, map[string]any{
+				"type":          "response.content_part.added",
+				"response_id":   responseID,
+				"item_id":       state.ID,
+				"output_index":  event.Index,
+				"content_index": 0,
+				"part": map[string]any{
+					"type":        "output_text",
+					"text":        "",
+					"annotations": []any{},
+				},
+			}); err != nil {
+				return blocks, err
+			}
 		}
 		if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
-			tools[event.Index] = &toolState{ID: event.ContentBlock.ID, Name: event.ContentBlock.Name}
+			state := &toolState{ID: event.ContentBlock.ID, Name: event.ContentBlock.Name}
+			tools[event.Index] = state
+			return blocks, writeEvent(w, map[string]any{
+				"type":         "response.output_item.added",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":        state.ID,
+					"type":      "function_call",
+					"status":    "in_progress",
+					"call_id":   state.ID,
+					"name":      state.Name,
+					"arguments": "",
+				},
+			})
 		}
 	case "content_block_delta":
 		if event.Delta == nil {
@@ -84,12 +132,14 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 		switch event.Delta.Type {
 		case "text_delta":
 			if text[event.Index] == nil {
-				text[event.Index] = &strings.Builder{}
+				text[event.Index] = &textState{ID: fmt.Sprintf("%s_msg_%d", responseID, event.Index)}
 			}
-			text[event.Index].WriteString(event.Delta.Text)
+			state := text[event.Index]
+			state.Text.WriteString(event.Delta.Text)
 			return blocks, writeEvent(w, map[string]any{
 				"type":          "response.output_text.delta",
 				"response_id":   responseID,
+				"item_id":       state.ID,
 				"output_index":  event.Index,
 				"content_index": 0,
 				"delta":         event.Delta.Text,
@@ -97,6 +147,13 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 		case "input_json_delta":
 			if state := tools[event.Index]; state != nil {
 				state.Arguments.WriteString(event.Delta.PartialJSON)
+				return blocks, writeEvent(w, map[string]any{
+					"type":         "response.function_call_arguments.delta",
+					"response_id":  responseID,
+					"item_id":      state.ID,
+					"output_index": event.Index,
+					"delta":        event.Delta.PartialJSON,
+				})
 			}
 		}
 	case "content_block_stop":
@@ -106,23 +163,73 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 				args = "{}"
 			}
 			blocks = append(blocks, anthropic.ContentBlock{Type: "tool_use", ID: state.ID, Name: state.Name, Input: json.RawMessage(args)})
-			return blocks, writeEvent(w, map[string]any{
+			if err := writeEvent(w, map[string]any{
 				"type":         "response.function_call_arguments.done",
 				"response_id":  responseID,
 				"item_id":      state.ID,
 				"output_index": event.Index,
 				"arguments":    args,
+			}); err != nil {
+				return blocks, err
+			}
+			return blocks, writeEvent(w, map[string]any{
+				"type":         "response.output_item.done",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":        state.ID,
+					"type":      "function_call",
+					"status":    "completed",
+					"call_id":   state.ID,
+					"name":      state.Name,
+					"arguments": args,
+				},
 			})
 		}
-		if text[event.Index] != nil {
-			blocks = append(blocks, anthropic.ContentBlock{Type: "text", Text: text[event.Index].String()})
+		if state := text[event.Index]; state != nil {
+			finalText := state.Text.String()
+			blocks = append(blocks, anthropic.ContentBlock{Type: "text", Text: finalText})
+			if err := writeEvent(w, map[string]any{
+				"type":          "response.output_text.done",
+				"response_id":   responseID,
+				"item_id":       state.ID,
+				"output_index":  event.Index,
+				"content_index": 0,
+				"text":          finalText,
+			}); err != nil {
+				return blocks, err
+			}
+			if err := writeEvent(w, map[string]any{
+				"type":          "response.content_part.done",
+				"response_id":   responseID,
+				"item_id":       state.ID,
+				"output_index":  event.Index,
+				"content_index": 0,
+				"part": map[string]any{
+					"type":        "output_text",
+					"text":        finalText,
+					"annotations": []any{},
+				},
+			}); err != nil {
+				return blocks, err
+			}
+			return blocks, writeEvent(w, map[string]any{
+				"type":         "response.output_item.done",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":     state.ID,
+					"type":   "message",
+					"status": "completed",
+					"role":   "assistant",
+					"content": []any{map[string]any{
+						"type":        "output_text",
+						"text":        finalText,
+						"annotations": []any{},
+					}},
+				},
+			})
 		}
-		return blocks, writeEvent(w, map[string]any{
-			"type":          "response.output_text.done",
-			"response_id":   responseID,
-			"output_index":  event.Index,
-			"content_index": 0,
-		})
 	case "message_stop":
 		return blocks, writeEvent(w, map[string]any{"type": "response.completed", "response": baseResponse(responseID, createdAt, "completed")})
 	case "error":

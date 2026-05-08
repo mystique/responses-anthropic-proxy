@@ -12,7 +12,24 @@ import (
 
 const defaultMaxTokens = 4096
 
+type Context struct {
+	ToolResolver func(callID string) (anthropicToolUseID string, ok bool)
+}
+
+type InputError struct {
+	Message string
+	Code    string
+}
+
+func (e *InputError) Error() string {
+	return e.Message
+}
+
 func CreateResponseToMessage(req openai.CreateResponseRequest, previous []anthropic.MessageParam, model string) (anthropic.CreateMessageRequest, error) {
+	return CreateResponseToMessageWithContext(req, previous, model, Context{})
+}
+
+func CreateResponseToMessageWithContext(req openai.CreateResponseRequest, previous []anthropic.MessageParam, model string, ctx Context) (anthropic.CreateMessageRequest, error) {
 	maxTokens := defaultMaxTokens
 	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
 		maxTokens = *req.MaxOutputTokens
@@ -29,7 +46,7 @@ func CreateResponseToMessage(req openai.CreateResponseRequest, previous []anthro
 		DisableParallelToolUse: disableParallel(req.ParallelToolCalls),
 		Stream:                 req.WantsStream(),
 	}
-	inputMessages, err := convertInput(req.Input)
+	inputMessages, err := convertInput(req.Input, ctx)
 	if err != nil {
 		return out, err
 	}
@@ -91,7 +108,7 @@ func FailureResponse(responseID string, createdAt int64, message string) openai.
 	return resp
 }
 
-func convertInput(raw openai.RawJSON) ([]anthropic.MessageParam, error) {
+func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, error) {
 	if raw.IsZero() {
 		return nil, nil
 	}
@@ -107,6 +124,7 @@ func convertInput(raw openai.RawJSON) ([]anthropic.MessageParam, error) {
 	var pendingUser []anthropic.ContentBlock
 	flushUser := func() {
 		if len(pendingUser) > 0 {
+			pendingUser = orderToolResultsFirst(pendingUser)
 			messages = append(messages, anthropic.MessageParam{Role: "user", Content: pendingUser})
 			pendingUser = nil
 		}
@@ -126,7 +144,11 @@ func convertInput(raw openai.RawJSON) ([]anthropic.MessageParam, error) {
 		case "input_image":
 			pendingUser = append(pendingUser, convertImage(item))
 		case "function_call_output":
-			pendingUser = append(pendingUser, anthropic.ContentBlock{Type: "tool_result", ToolUseID: item.CallID, Content: item.Output})
+			block, err := convertFunctionCallOutput(item, ctx)
+			if err != nil {
+				return nil, err
+			}
+			pendingUser = append(pendingUser, block)
 		}
 	}
 	flushUser()
@@ -140,7 +162,7 @@ type inputItem struct {
 	Text     string        `json:"text,omitempty"`
 	ImageURL string        `json:"image_url,omitempty"`
 	CallID   string        `json:"call_id,omitempty"`
-	Output   string        `json:"output,omitempty"`
+	Output   any           `json:"output,omitempty"`
 }
 
 type contentItem struct {
@@ -160,6 +182,72 @@ func convertContentItems(items []contentItem) []anthropic.ContentBlock {
 		}
 	}
 	return blocks
+}
+
+func convertFunctionCallOutput(item inputItem, ctx Context) (anthropic.ContentBlock, error) {
+	toolUseID := item.CallID
+	if ctx.ToolResolver != nil {
+		var ok bool
+		toolUseID, ok = ctx.ToolResolver(item.CallID)
+		if !ok {
+			return anthropic.ContentBlock{}, &InputError{Message: "tool call not found: " + item.CallID, Code: "tool_call_not_found"}
+		}
+	}
+	content, err := convertToolResultContent(item.Output)
+	if err != nil {
+		return anthropic.ContentBlock{}, err
+	}
+	return anthropic.ContentBlock{Type: "tool_result", ToolUseID: toolUseID, Content: content}, nil
+}
+
+func convertToolResultContent(raw any) (any, error) {
+	switch v := raw.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return v, nil
+	case []any:
+		blocks := make([]anthropic.ContentBlock, 0, len(v))
+		for _, elem := range v {
+			b, err := json.Marshal(elem)
+			if err != nil {
+				return nil, err
+			}
+			var item contentItem
+			if err := json.Unmarshal(b, &item); err != nil {
+				return nil, err
+			}
+			switch item.Type {
+			case "input_text", "output_text", "text":
+				blocks = append(blocks, anthropic.ContentBlock{Type: "text", Text: item.Text})
+			case "input_image":
+				blocks = append(blocks, convertImage(inputItem{ImageURL: item.ImageURL}))
+			default:
+				return nil, &InputError{Message: "unsupported function_call_output content type: " + item.Type, Code: "unsupported_tool_result_content"}
+			}
+		}
+		return blocks, nil
+	default:
+		return nil, &InputError{Message: fmt.Sprintf("unsupported function_call_output output type: %T", raw), Code: "unsupported_tool_result_output"}
+	}
+}
+
+func orderToolResultsFirst(blocks []anthropic.ContentBlock) []anthropic.ContentBlock {
+	if len(blocks) < 2 {
+		return blocks
+	}
+	out := make([]anthropic.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == "tool_result" {
+			out = append(out, block)
+		}
+	}
+	for _, block := range blocks {
+		if block.Type != "tool_result" {
+			out = append(out, block)
+		}
+	}
+	return out
 }
 
 func convertImage(item inputItem) anthropic.ContentBlock {

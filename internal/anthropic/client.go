@@ -16,6 +16,17 @@ type Client struct {
 	http    *http.Client
 }
 
+type APIError struct {
+	StatusCode int
+	Type       string
+	Message    string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("anthropic returned %d: %s", e.StatusCode, e.Body)
+}
+
 func NewClient(baseURL, apiKey string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -41,7 +52,7 @@ func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest) (M
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return out, fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(b))
+		return out, parseAPIError(resp.StatusCode, b)
 	}
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
@@ -63,7 +74,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageReque
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(b))
+		return nil, parseAPIError(resp.StatusCode, b)
 	}
 	return resp.Body, nil
 }
@@ -73,4 +84,17 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
+}
+
+func parseAPIError(status int, body []byte) error {
+	apiErr := &APIError{StatusCode: status, Body: string(body)}
+	var parsed ErrorResponse
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		apiErr.Type = parsed.Error.Type
+		apiErr.Message = parsed.Error.Message
+	}
+	if apiErr.Message == "" {
+		apiErr.Message = string(body)
+	}
+	return apiErr
 }

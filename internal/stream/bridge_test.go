@@ -40,11 +40,54 @@ func TestBridgeTextStream(t *testing.T) {
 	events := collectEvents(t, output.String())
 	assertHasEvent(t, events, "response.created")
 	assertHasEvent(t, events, "response.in_progress")
+	assertHasEvent(t, events, "response.output_item.added")
+	assertHasEvent(t, events, "response.content_part.added")
 	assertHasEvent(t, events, "response.output_text.delta")
 	assertHasEvent(t, events, "response.output_text.done")
+	assertHasEvent(t, events, "response.content_part.done")
+	assertHasEvent(t, events, "response.output_item.done")
 	assertHasEvent(t, events, "response.completed")
 	if !strings.Contains(output.String(), `"delta":"Hel"`) || !strings.Contains(output.String(), `"delta":"lo"`) {
 		t.Fatalf("missing text deltas in output:\n%s", output.String())
+	}
+}
+
+func TestBridgeTextStreamOpensOutputItemBeforeTextDelta(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := stream.Bridge(input, &output, "resp_1", 111); err != nil {
+		t.Fatalf("Bridge returned error: %v", err)
+	}
+
+	payloads := collectPayloads(t, output.String())
+	added := indexOfEvent(payloads, "response.output_item.added")
+	partAdded := indexOfEvent(payloads, "response.content_part.added")
+	delta := indexOfEvent(payloads, "response.output_text.delta")
+	textDone := indexOfEvent(payloads, "response.output_text.done")
+	partDone := indexOfEvent(payloads, "response.content_part.done")
+	itemDone := indexOfEvent(payloads, "response.output_item.done")
+	if added == -1 || partAdded == -1 || delta == -1 || textDone == -1 || partDone == -1 || itemDone == -1 {
+		t.Fatalf("missing stream lifecycle events: %+v", eventTypes(payloads))
+	}
+	if !(added < partAdded && partAdded < delta && delta < textDone && textDone < partDone && partDone < itemDone) {
+		t.Fatalf("unexpected stream event order: %+v", eventTypes(payloads))
+	}
+	if payloads[delta]["item_id"] == "" || payloads[textDone]["text"] != "Hi" {
+		t.Fatalf("text events missing item id or final text: %+v %+v", payloads[delta], payloads[textDone])
 	}
 }
 
@@ -73,7 +116,10 @@ func TestBridgeToolUseStream(t *testing.T) {
 	}
 
 	events := collectEvents(t, output.String())
+	assertHasEvent(t, events, "response.output_item.added")
+	assertHasEvent(t, events, "response.function_call_arguments.delta")
 	assertHasEvent(t, events, "response.function_call_arguments.done")
+	assertHasEvent(t, events, "response.output_item.done")
 	if !strings.Contains(output.String(), `"arguments":"{\"q\":\"abc\"}"`) {
 		t.Fatalf("missing tool arguments in output:\n%s", output.String())
 	}
@@ -132,24 +178,53 @@ func TestBridgeUpstreamErrorEmitsResponseFailed(t *testing.T) {
 
 func collectEvents(t *testing.T, s string) []string {
 	t.Helper()
+	payloads := collectPayloads(t, s)
 	var events []string
+	for _, payload := range payloads {
+		if typ, ok := payload["type"].(string); ok {
+			events = append(events, typ)
+		}
+	}
+	return events
+}
+
+func collectPayloads(t *testing.T, s string) []map[string]any {
+	t.Helper()
+	var payloads []map[string]any
 	scanner := bufio.NewScanner(strings.NewReader(s))
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
-			var payload struct {
-				Type string `json:"type"`
-			}
+			var payload map[string]any
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
 				t.Fatalf("invalid json payload %q: %v", line, err)
 			}
-			events = append(events, payload.Type)
+			payloads = append(payloads, payload)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return events
+	return payloads
+}
+
+func indexOfEvent(payloads []map[string]any, want string) int {
+	for i, payload := range payloads {
+		if payload["type"] == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func eventTypes(payloads []map[string]any) []string {
+	types := make([]string, 0, len(payloads))
+	for _, payload := range payloads {
+		if typ, ok := payload["type"].(string); ok {
+			types = append(types, typ)
+		}
+	}
+	return types
 }
 
 func assertHasEvent(t *testing.T, events []string, want string) {
