@@ -1,3 +1,4 @@
 .gocache/
 bin/
 *.test
+.env

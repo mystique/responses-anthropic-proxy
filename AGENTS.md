@@ -4,7 +4,7 @@
 
 This repository is a Go HTTP proxy exposing an OpenAI Responses-compatible API backed by Anthropic Messages.
 
-- `cmd/proxy/`: executable entry point and environment wiring.
+- `cmd/rap/`: executable entry point and environment wiring.
 - `internal/openai/`: OpenAI Responses request, response, tool, and error types.
 - `internal/anthropic/`: Anthropic Messages types and upstream HTTP client.
 - `internal/convert/`: bidirectional OpenAI/Anthropic conversion logic.
@@ -20,7 +20,7 @@ Tests live beside their package as `*_test.go`.
 
 - `go test ./...`: run all tests.
 - `GOCACHE="$PWD/.gocache" go test -count=1 ./...`: run fresh tests with a repo-local cache.
-- `go run ./cmd/proxy`: start the proxy directly.
+- `go run ./cmd/rap`: start the proxy directly.
 - `ANTHROPIC_API_KEY=sk-ant-... ./scripts/run-proxy.sh`: start with editable defaults from the script.
 - `gofmt -w <files>`: format Go files before committing.
 

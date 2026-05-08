@@ -1,26 +1,47 @@
-# uni-api
+# responses-anthropic-proxy
 
 Local OpenAI Responses API compatibility proxy backed by Anthropic Messages.
 
 ## Run
 
-```sh
-ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/proxy
-```
-
-Or use the editable script:
+Create a local `.env` file in the project root:
 
 ```sh
-ANTHROPIC_API_KEY=sk-ant-... ./scripts/run-proxy.sh
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+PROXY_ADDR=127.0.0.1:8180
 ```
 
-Runtime parameters are at the top of [scripts/run-proxy.sh](scripts/run-proxy.sh).
+The service loads `.env` automatically on startup. Existing shell environment variables take precedence over values in `.env`.
+
+Start directly:
+
+```sh
+go run ./cmd/rap
+```
+
+Or use the helper script:
+
+```sh
+./scripts/run-proxy.sh
+```
+
+The `.env` file is ignored by git and should not be committed.
+
+Build the short command binary:
+
+```sh
+go build -o rap ./cmd/rap
+```
 
 Defaults:
 
 - `PROXY_ADDR=127.0.0.1:8180`
 - `ANTHROPIC_MODEL=claude-sonnet-4-6`
 - `ANTHROPIC_BASE_URL=https://api.anthropic.com`
+
+`ANTHROPIC_API_KEY` is required.
 
 Point Codex or another Responses API client at:
 
