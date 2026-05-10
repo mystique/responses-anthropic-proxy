@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"responses-anthropic-proxy/internal/anthropic"
-	"responses-anthropic-proxy/internal/openai"
-	"responses-anthropic-proxy/internal/server"
-	"responses-anthropic-proxy/internal/state"
+	"rap/internal/anthropic"
+	"rap/internal/openai"
+	"rap/internal/server"
+	"rap/internal/state"
 )
 
 func TestResponsesHandlerProxiesNonStreamingRequest(t *testing.T) {

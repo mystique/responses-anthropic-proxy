@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"responses-anthropic-proxy/internal/anthropic"
-	"responses-anthropic-proxy/internal/convert"
-	"responses-anthropic-proxy/internal/openai"
+	"rap/internal/anthropic"
+	"rap/internal/convert"
+	"rap/internal/openai"
 )
 
 func TestCreateResponseToMessageConvertsCoreFieldsAndTools(t *testing.T) {

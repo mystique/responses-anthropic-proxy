@@ -1,4 +1,4 @@
-# responses-anthropic-proxy
+# rap
 
 Local OpenAI Responses API compatibility proxy backed by Anthropic Messages.
 

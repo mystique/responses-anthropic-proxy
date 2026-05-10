@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"responses-anthropic-proxy/internal/server"
-	"responses-anthropic-proxy/internal/state"
+	"rap/internal/server"
+	"rap/internal/state"
 )
 
 func main() {

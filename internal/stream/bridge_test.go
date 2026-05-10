@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"responses-anthropic-proxy/internal/stream"
+	"rap/internal/stream"
 )
 
 func TestBridgeTextStream(t *testing.T) {

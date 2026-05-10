@@ -1,3 +1,3 @@
-module responses-anthropic-proxy
+module rap
 
 go 1.26

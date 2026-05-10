@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"responses-anthropic-proxy/internal/anthropic"
-	"responses-anthropic-proxy/internal/openai"
+	"rap/internal/anthropic"
+	"rap/internal/openai"
 )
 
 const defaultMaxTokens = 4096

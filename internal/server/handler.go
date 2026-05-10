@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"responses-anthropic-proxy/internal/anthropic"
-	"responses-anthropic-proxy/internal/convert"
-	"responses-anthropic-proxy/internal/openai"
-	"responses-anthropic-proxy/internal/state"
-	"responses-anthropic-proxy/internal/stream"
+	"rap/internal/anthropic"
+	"rap/internal/convert"
+	"rap/internal/openai"
+	"rap/internal/state"
+	"rap/internal/stream"
 )
 
 type Config struct {
