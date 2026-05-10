@@ -174,7 +174,7 @@ func (s *Store) Snapshot() Snapshot {
 		}
 		for _, item := range record.Response.Output {
 			summary.OutputTypes = append(summary.OutputTypes, item.Type)
-			if item.Type == "function_call" && item.CallID != "" {
+			if isToolCallOutput(item) && item.CallID != "" {
 				summary.ToolCallIDs = append(summary.ToolCallIDs, item.CallID)
 			}
 		}
@@ -198,12 +198,16 @@ func (s *Store) indexToolCallsLocked(record ResponseRecord) {
 	toolUses := toolUsesByIndex(record.Transcript)
 	toolUseIndex := 0
 	for i, item := range record.Response.Output {
-		if item.Type != "function_call" || item.CallID == "" {
+		if !isToolCallOutput(item) || item.CallID == "" {
 			continue
 		}
 		toolUseID := item.CallID
+		name := item.Name
 		if toolUseIndex < len(toolUses) && toolUses[toolUseIndex].ID != "" {
 			toolUseID = toolUses[toolUseIndex].ID
+			if name == "" {
+				name = toolUses[toolUseIndex].Name
+			}
 		}
 		toolUseIndex++
 		resolvedAt := int64(0)
@@ -214,7 +218,7 @@ func (s *Store) indexToolCallsLocked(record ResponseRecord) {
 			OpenAICallID:       item.CallID,
 			AnthropicToolUseID: toolUseID,
 			ResponseID:         record.ID,
-			Name:               item.Name,
+			Name:               name,
 			Arguments:          item.Arguments,
 			OutputIndex:        i,
 			CreatedAt:          record.CreatedAt,
@@ -226,6 +230,10 @@ func (s *Store) indexToolCallsLocked(record ResponseRecord) {
 		return
 	}
 	s.toolCalls[record.ID] = next
+}
+
+func isToolCallOutput(item openai.OutputItem) bool {
+	return item.Type == "function_call" || item.Type == "computer_call"
 }
 
 func toolUsesByIndex(transcript []anthropic.MessageParam) []anthropic.ContentBlock {
@@ -260,6 +268,11 @@ func cloneResponse(in openai.Response) openai.Response {
 		out.Output[i] = item
 		out.Output[i].Content = make([]openai.ContentItem, len(item.Content))
 		copy(out.Output[i].Content, item.Content)
+		out.Output[i].Summary = make([]openai.ReasoningSummaryItem, len(item.Summary))
+		copy(out.Output[i].Summary, item.Summary)
+		if item.Action != nil {
+			out.Output[i].Action = append([]byte(nil), item.Action...)
+		}
 	}
 	if in.Usage != nil {
 		usage := *in.Usage

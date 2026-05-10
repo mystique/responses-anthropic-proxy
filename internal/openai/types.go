@@ -24,17 +24,25 @@ func (r RawJSON) IsZero() bool {
 }
 
 type CreateResponseRequest struct {
-	Model              string   `json:"model,omitempty"`
-	Input              RawJSON  `json:"input,omitempty"`
-	Instructions       string   `json:"instructions,omitempty"`
-	PreviousResponseID string   `json:"previous_response_id,omitempty"`
-	MaxOutputTokens    *int     `json:"max_output_tokens,omitempty"`
-	Temperature        *float64 `json:"temperature,omitempty"`
-	TopP               *float64 `json:"top_p,omitempty"`
-	ParallelToolCalls  *bool    `json:"parallel_tool_calls,omitempty"`
-	Stream             *bool    `json:"stream,omitempty"`
-	Tools              []Tool   `json:"tools,omitempty"`
-	ToolChoice         RawJSON  `json:"tool_choice,omitempty"`
+	Model              string             `json:"model,omitempty"`
+	Input              RawJSON            `json:"input,omitempty"`
+	Instructions       string             `json:"instructions,omitempty"`
+	PreviousResponseID string             `json:"previous_response_id,omitempty"`
+	MaxOutputTokens    *int               `json:"max_output_tokens,omitempty"`
+	Temperature        *float64           `json:"temperature,omitempty"`
+	TopP               *float64           `json:"top_p,omitempty"`
+	ParallelToolCalls  *bool              `json:"parallel_tool_calls,omitempty"`
+	Stream             *bool              `json:"stream,omitempty"`
+	Tools              []Tool             `json:"tools,omitempty"`
+	ToolChoice         RawJSON            `json:"tool_choice,omitempty"`
+	Reasoning          RawJSON            `json:"reasoning,omitempty"`
+	Stop               RawJSON            `json:"stop,omitempty"`
+	Text               RawJSON            `json:"text,omitempty"`
+	Truncation         string             `json:"truncation,omitempty"`
+	Include            []string           `json:"include,omitempty"`
+	Metadata           map[string]RawJSON `json:"metadata,omitempty"`
+	Store              *bool              `json:"store,omitempty"`
+	User               string             `json:"user,omitempty"`
 }
 
 func (r CreateResponseRequest) WantsStream() bool {
@@ -80,14 +88,18 @@ type Response struct {
 }
 
 type OutputItem struct {
-	ID        string        `json:"id,omitempty"`
-	Type      string        `json:"type"`
-	Status    string        `json:"status,omitempty"`
-	Role      string        `json:"role,omitempty"`
-	Content   []ContentItem `json:"content,omitempty"`
-	CallID    string        `json:"call_id,omitempty"`
-	Name      string        `json:"name,omitempty"`
-	Arguments string        `json:"arguments,omitempty"`
+	ID                  string                 `json:"id,omitempty"`
+	Type                string                 `json:"type"`
+	Status              string                 `json:"status,omitempty"`
+	Role                string                 `json:"role,omitempty"`
+	Content             []ContentItem          `json:"content,omitempty"`
+	Summary             []ReasoningSummaryItem `json:"summary,omitempty"`
+	EncryptedContent    string                 `json:"encrypted_content,omitempty"`
+	Action              json.RawMessage        `json:"action,omitempty"`
+	PendingSafetyChecks []any                  `json:"pending_safety_checks,omitempty"`
+	CallID              string                 `json:"call_id,omitempty"`
+	Name                string                 `json:"name,omitempty"`
+	Arguments           string                 `json:"arguments,omitempty"`
 }
 
 type ContentItem struct {
@@ -96,10 +108,21 @@ type ContentItem struct {
 	Annotations []any  `json:"annotations,omitempty"`
 }
 
+type ReasoningSummaryItem struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 type Usage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	TotalTokens  int `json:"total_tokens,omitempty"`
+	InputTokens        int                 `json:"input_tokens,omitempty"`
+	OutputTokens       int                 `json:"output_tokens,omitempty"`
+	TotalTokens        int                 `json:"total_tokens,omitempty"`
+	InputTokensDetails *InputTokensDetails `json:"input_tokens_details,omitempty"`
+}
+
+type InputTokensDetails struct {
+	CachedTokens        int `json:"cached_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }
 
 type ErrorResponse struct {

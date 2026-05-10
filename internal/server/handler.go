@@ -241,7 +241,7 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		writeUpstreamError(w, err)
 		return
 	}
-	resp, assistantTranscript, err := convert.MessageToResponse(msg, responseID, createdAt)
+	resp, assistantTranscript, err := convert.MessageToResponseWithOptions(msg, responseID, createdAt, convert.ResponseOptions{Include: req.Include})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, openai.NewErrorResponse(err.Error(), "upstream_error", "conversion_error"))
 		return
@@ -356,7 +356,7 @@ func (h *Handler) createResponseStream(w http.ResponseWriter, r *http.Request, r
 			Content:    assistantTranscript.Content,
 			StopReason: "end_turn",
 		}
-		converted, _, convErr := convert.MessageToResponse(msg, responseID, createdAt)
+		converted, _, convErr := convert.MessageToResponseWithOptions(msg, responseID, createdAt, convert.ResponseOptions{Include: req.Include})
 		if convErr == nil {
 			resp = converted
 			resp.Status = status
@@ -421,11 +421,11 @@ func functionCallOutputIDs(raw openai.RawJSON) ([]string, error) {
 	var ids []string
 	seen := map[string]bool{}
 	for _, item := range items {
-		if item.Type != "function_call_output" {
+		if item.Type != "function_call_output" && item.Type != "computer_call_output" {
 			continue
 		}
 		if item.CallID == "" {
-			return nil, fmt.Errorf("function_call_output missing call_id")
+			return nil, fmt.Errorf("%s missing call_id", item.Type)
 		}
 		if !seen[item.CallID] {
 			ids = append(ids, item.CallID)
@@ -448,7 +448,7 @@ func inlineFunctionCallIDs(raw openai.RawJSON) map[string]bool {
 		return ids
 	}
 	for _, item := range items {
-		if item.Type == "function_call" && item.CallID != "" {
+		if (item.Type == "function_call" || item.Type == "computer_call") && item.CallID != "" {
 			ids[item.CallID] = true
 		}
 	}

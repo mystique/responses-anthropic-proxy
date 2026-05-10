@@ -44,7 +44,7 @@ func (c *Client) CreateMessage(ctx context.Context, req CreateMessageRequest, me
 	if err != nil {
 		return out, err
 	}
-	c.setHeaders(httpReq, metadataHeaders)
+	c.setHeaders(httpReq, metadataHeaders, req.Betas)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return out, err
@@ -66,7 +66,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageReque
 	if err != nil {
 		return nil, err
 	}
-	c.setHeaders(httpReq, metadataHeaders)
+	c.setHeaders(httpReq, metadataHeaders, req.Betas)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req CreateMessageReque
 	return resp.Body, nil
 }
 
-func (c *Client) setHeaders(req *http.Request, metadataHeaders http.Header) {
+func (c *Client) setHeaders(req *http.Request, metadataHeaders http.Header, betas []string) {
 	for name, values := range metadataHeaders {
 		for _, value := range values {
 			req.Header.Add(name, value)
@@ -89,6 +89,9 @@ func (c *Client) setHeaders(req *http.Request, metadataHeaders http.Header) {
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
+	if len(betas) > 0 {
+		req.Header.Set("anthropic-beta", strings.Join(betas, ","))
+	}
 }
 
 func parseAPIError(status int, body []byte) error {

@@ -116,6 +116,114 @@ func TestResponsesHandlerForwardsClientMetadataHeaders(t *testing.T) {
 	}
 }
 
+func TestResponsesHandlerRejectsUnsupportedToolTypeWithoutCallingUpstream(t *testing.T) {
+	var calls int
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		t.Fatalf("unsupported tool request should not call upstream")
+		return nil, nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"hi",
+		"tools":[{"type":"file_search_preview"}]
+	}`))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("upstream was called %d times", calls)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"unsupported_tool_type"`) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestResponsesHandlerForwardsCustomToolAsAnthropicTool(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"ready"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"hi",
+		"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch"}]
+	}`))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	tools, ok := upstreamBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("upstream tools missing: %+v", upstreamBody)
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected tool shape: %+v", tools[0])
+	}
+	if tool["type"] != nil || tool["name"] != "apply_patch" || tool["description"] != "Apply a patch" {
+		t.Fatalf("custom tool not mapped as Anthropic function tool: %+v", tool)
+	}
+	if schema, ok := tool["input_schema"].(map[string]any); !ok || schema["type"] != "object" {
+		t.Fatalf("input_schema missing: %+v", tool)
+	}
+}
+
+func TestResponsesHandlerForwardsComputerUseBetaHeader(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("anthropic-beta"); got != "computer-use-2025-01-24" {
+			t.Fatalf("missing computer use beta header: %q", got)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"ready"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"hi",
+		"truncation":"auto",
+		"tools":[{"type":"computer_use_preview","display_width":1024,"display_height":768,"environment":"browser"}]
+	}`))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestResponsesHandlerUsesPreviousResponseIDTranscript(t *testing.T) {
 	var requestBodies []map[string]any
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -212,6 +320,58 @@ func TestResponsesHandlerSendsToolResultWithResolvedToolUseID(t *testing.T) {
 	block := content[0].(map[string]any)
 	if block["type"] != "tool_result" || block["tool_use_id"] != "toolu_1" {
 		t.Fatalf("tool result did not use Anthropic tool_use id: %+v", block)
+	}
+}
+
+func TestResponsesHandlerSendsComputerCallOutputWithResolvedToolUseID(t *testing.T) {
+	var requestBodies []map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requestBodies = append(requestBodies, body)
+		if len(requestBodies) == 1 {
+			return jsonResponse(http.StatusOK, `{
+				"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+				"content":[{"type":"tool_use","id":"toolu_1","name":"computer","input":{"action":"screenshot"}}],
+				"stop_reason":"tool_use"
+			}`), nil
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_2","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"done"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+	store := state.NewStore(24 * time.Hour)
+	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	var firstResp openai.Response
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstResp.Output) != 1 || firstResp.Output[0].Type != "computer_call" {
+		t.Fatalf("expected computer_call response, got %+v", firstResp.Output)
+	}
+
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"previous_response_id":"`+firstResp.ID+`",
+		"input":[{"type":"computer_call_output","call_id":"`+firstResp.Output[0].CallID+`","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,abc"}}]
+	}`)))
+
+	if second.Code != http.StatusOK {
+		t.Fatalf("unexpected second status %d: %s", second.Code, second.Body.String())
+	}
+	messages := requestBodies[1]["messages"].([]any)
+	toolResultUser := messages[len(messages)-1].(map[string]any)
+	content := toolResultUser["content"].([]any)
+	block := content[0].(map[string]any)
+	if block["type"] != "tool_result" || block["tool_use_id"] != "toolu_1" {
+		t.Fatalf("computer result did not use Anthropic tool_use id: %+v", block)
 	}
 }
 

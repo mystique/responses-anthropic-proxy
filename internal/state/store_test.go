@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -130,6 +131,35 @@ func TestStoreIndexesToolCallsByResponseAndCallID(t *testing.T) {
 	}
 	if got.OpenAICallID != "call_1" || got.AnthropicToolUseID != "toolu_1" || got.ResponseID != "resp_1" {
 		t.Fatalf("unexpected tool call record: %+v", got)
+	}
+}
+
+func TestStoreIndexesComputerCallsByResponseAndCallID(t *testing.T) {
+	store := state.NewStore(time.Hour)
+	resp := openai.NewBaseResponse("resp_1", "m", "completed", 123)
+	resp.Output = []openai.OutputItem{{
+		Type:   "computer_call",
+		CallID: "call_1",
+		Action: json.RawMessage(`{"type":"click","x":1,"y":2}`),
+	}}
+	transcript := []anthropic.MessageParam{{
+		Role: "assistant",
+		Content: []anthropic.ContentBlock{{
+			Type:  "tool_use",
+			ID:    "toolu_1",
+			Name:  "computer",
+			Input: json.RawMessage(`{"action":"left_click","coordinate":[1,2]}`),
+		}},
+	}}
+
+	store.Save(state.ResponseRecord{ID: "resp_1", Response: resp, Transcript: transcript, Status: "completed", CreatedAt: 123})
+
+	got, ok := store.FindToolCall("resp_1", "call_1")
+	if !ok {
+		t.Fatal("computer call not indexed")
+	}
+	if got.AnthropicToolUseID != "toolu_1" || got.Name != "computer" {
+		t.Fatalf("unexpected computer call record: %+v", got)
 	}
 }
 

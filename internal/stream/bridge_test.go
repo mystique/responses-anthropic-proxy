@@ -125,6 +125,36 @@ func TestBridgeToolUseStream(t *testing.T) {
 	}
 }
 
+func TestBridgeComputerToolUseStream(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"computer","input":{}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"action\":\"left_click\",\"coordinate\":[10,20]}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n"))
+	var output bytes.Buffer
+
+	got, err := stream.BridgeWithResult(input, &output, "resp_1", 111)
+	if err != nil {
+		t.Fatalf("BridgeWithResult returned error: %v", err)
+	}
+
+	if !strings.Contains(output.String(), `"type":"computer_call"`) || !strings.Contains(output.String(), `"action":{"button":"left","type":"click","x":10,"y":20}`) {
+		t.Fatalf("computer call stream output missing converted action:\n%s", output.String())
+	}
+	if len(got.Content) != 1 || got.Content[0].Name != "computer" || string(got.Content[0].Input) != `{"action":"left_click","coordinate":[10,20]}` {
+		t.Fatalf("computer tool transcript not reconstructed: %+v", got.Content)
+	}
+}
+
 func TestBridgeToolUseStreamSynthesizesMissingToolUseID(t *testing.T) {
 	input := strings.NewReader(strings.Join([]string{
 		`event: content_block_start`,
@@ -155,6 +185,53 @@ func TestBridgeToolUseStreamSynthesizesMissingToolUseID(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"call_id":"resp_1_tool_1"`) {
 		t.Fatalf("stream output did not use synthesized call id:\n%s", output.String())
+	}
+}
+
+func TestBridgeThinkingStreamReturnsReasoningEventsAndTranscript(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_123"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"encrypted_123"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n"))
+	var output bytes.Buffer
+
+	got, err := stream.BridgeWithResult(input, &output, "resp_1", 111)
+	if err != nil {
+		t.Fatalf("BridgeWithResult returned error: %v", err)
+	}
+
+	events := collectEvents(t, output.String())
+	assertHasEvent(t, events, "response.output_item.added")
+	assertHasEvent(t, events, "response.reasoning_summary_text.delta")
+	assertHasEvent(t, events, "response.reasoning_summary_text.done")
+	assertHasEvent(t, events, "response.output_item.done")
+	if !strings.Contains(output.String(), `"encrypted_content":"sig_123"`) || !strings.Contains(output.String(), `"encrypted_content":"encrypted_123"`) {
+		t.Fatalf("thinking encrypted content missing from stream:\n%s", output.String())
+	}
+	if len(got.Content) != 2 || got.Content[0].Type != "thinking" || got.Content[0].Thinking != "plan" || got.Content[0].Signature != "sig_123" {
+		t.Fatalf("thinking transcript not reconstructed: %+v", got.Content)
+	}
+	if got.Content[1].Type != "redacted_thinking" || got.Content[1].Data != "encrypted_123" {
+		t.Fatalf("redacted thinking transcript not reconstructed: %+v", got.Content)
 	}
 }
 
