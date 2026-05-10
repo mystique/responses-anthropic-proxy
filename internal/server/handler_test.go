@@ -117,34 +117,38 @@ func TestResponsesHandlerForwardsClientMetadataHeaders(t *testing.T) {
 }
 
 func TestResponsesHandlerRejectsUnsupportedToolTypeWithoutCallingUpstream(t *testing.T) {
-	var calls int
-	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		calls++
-		t.Fatalf("unsupported tool request should not call upstream")
-		return nil, nil
-	})}
-	h := server.New(server.Config{
-		AnthropicAPIKey:  "anthropic-key",
-		AnthropicModel:   "claude-test",
-		AnthropicBaseURL: "http://anthropic.test",
-	}, state.NewStore(24*time.Hour), httpClient)
+	for _, toolType := range []string{"file_search_preview", "unknown_preview"} {
+		t.Run(toolType, func(t *testing.T) {
+			var calls int
+			httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				t.Fatalf("unsupported tool request should not call upstream")
+				return nil, nil
+			})}
+			h := server.New(server.Config{
+				AnthropicAPIKey:  "anthropic-key",
+				AnthropicModel:   "claude-test",
+				AnthropicBaseURL: "http://anthropic.test",
+			}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
 		"input":"hi",
-		"tools":[{"type":"file_search_preview"}]
+		"tools":[{"type":"`+toolType+`"}]
 	}`))
-	rec := httptest.NewRecorder()
+			rec := httptest.NewRecorder()
 
-	h.ServeHTTP(rec, req)
+			h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
-	}
-	if calls != 0 {
-		t.Fatalf("upstream was called %d times", calls)
-	}
-	if !strings.Contains(rec.Body.String(), `"code":"unsupported_tool_type"`) {
-		t.Fatalf("unexpected body: %s", rec.Body.String())
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+			}
+			if calls != 0 {
+				t.Fatalf("upstream was called %d times", calls)
+			}
+			if !strings.Contains(rec.Body.String(), `"code":"unsupported_tool_type"`) {
+				t.Fatalf("unexpected body: %s", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -190,6 +194,49 @@ func TestResponsesHandlerForwardsCustomToolAsAnthropicTool(t *testing.T) {
 	}
 	if schema, ok := tool["input_schema"].(map[string]any); !ok || schema["type"] != "object" {
 		t.Fatalf("input_schema missing: %+v", tool)
+	}
+}
+
+func TestResponsesHandlerForwardsWebSearchTool(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_123",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-test",
+			"content":[{"type":"text","text":"done"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":1,"output_tokens":1}
+		}`), nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"Search",
+		"tools":[{"type":"web_search","max_uses":2}]
+	}`))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	tools, ok := upstreamBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("upstream tools missing: %+v", upstreamBody)
+	}
+	tool := tools[0].(map[string]any)
+	if tool["type"] != "web_search_20250305" || tool["name"] != "web_search" || tool["max_uses"].(float64) != 2 {
+		t.Fatalf("web search tool not forwarded: %+v", tool)
 	}
 }
 
@@ -267,6 +314,78 @@ func TestResponsesHandlerUsesPreviousResponseIDTranscript(t *testing.T) {
 	}
 	if len(messages) != 3 {
 		t.Fatalf("expected previous user+assistant plus new user messages, got %+v", messages)
+	}
+}
+
+func TestResponsesHandlerStoresWebSearchTranscriptForContinuation(t *testing.T) {
+	var upstreamBodies []map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		upstreamBodies = append(upstreamBodies, body)
+		if len(upstreamBodies) == 1 {
+			return jsonResponse(http.StatusOK, `{
+				"id":"msg_1",
+				"type":"message",
+				"role":"assistant",
+				"model":"claude-test",
+				"content":[
+					{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"OpenAI news"}},
+					{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","title":"OpenAI News","url":"https://example.com/openai"}]},
+					{"type":"text","text":"OpenAI news"}
+				],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":1,"output_tokens":1}
+			}`), nil
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_2",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-test",
+			"content":[{"type":"text","text":"continued"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":1,"output_tokens":1}
+		}`), nil
+	})}
+	store := state.NewStore(24 * time.Hour)
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, store, httpClient)
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"Search",
+		"tools":[{"type":"web_search"}]
+	}`)))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status %d: %s", first.Code, first.Body.String())
+	}
+	var firstResp openai.Response
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatal(err)
+	}
+
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"previous_response_id":"`+firstResp.ID+`",
+		"input":"Continue"
+	}`)))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status %d: %s", second.Code, second.Body.String())
+	}
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("expected two upstream calls, got %d", len(upstreamBodies))
+	}
+	messages := upstreamBodies[1]["messages"].([]any)
+	assistant := messages[1].(map[string]any)
+	content := assistant["content"].([]any)
+	if len(content) != 3 || content[0].(map[string]any)["type"] != "server_tool_use" || content[1].(map[string]any)["type"] != "web_search_tool_result" {
+		t.Fatalf("web search transcript not restored: %+v", upstreamBodies[1])
 	}
 }
 

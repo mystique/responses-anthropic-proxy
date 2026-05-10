@@ -34,6 +34,7 @@ type ContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   any             `json:"content,omitempty"`
+	Citations []Citation      `json:"citations,omitempty"`
 }
 
 type ImageSource struct {
@@ -51,6 +52,25 @@ type Tool struct {
 	DisplayWidthPx  int             `json:"display_width_px,omitempty"`
 	DisplayHeightPx int             `json:"display_height_px,omitempty"`
 	DisplayNumber   int             `json:"display_number,omitempty"`
+	MaxUses         int             `json:"max_uses,omitempty"`
+	AllowedDomains  []string        `json:"allowed_domains,omitempty"`
+	BlockedDomains  []string        `json:"blocked_domains,omitempty"`
+	UserLocation    *UserLocation   `json:"user_location,omitempty"`
+}
+
+type UserLocation struct {
+	Type     string `json:"type,omitempty"`
+	City     string `json:"city,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Country  string `json:"country,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+}
+
+type Citation struct {
+	Type      string `json:"type,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title,omitempty"`
+	CitedText string `json:"cited_text,omitempty"`
 }
 
 type ToolChoice struct {

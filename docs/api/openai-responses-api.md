@@ -68,6 +68,26 @@ type CreateResponseRequest = {
 3. 客户端执行工具
 4. 后续请求 input 带 `function_call_output`
 
+### Web search tools
+
+The proxy accepts `tools` entries with `type:"web_search"` and `type:"web_search_preview"`.
+Both are mapped to Anthropic server-side web search.
+
+Supported pass-through fields:
+
+- `max_uses`
+- `allowed_domains`
+- `blocked_domains`
+- `filters.allowed_domains`
+- `filters.blocked_domains`
+- `user_location.type`
+- `user_location.city`
+- `user_location.region`
+- `user_location.country`
+- `user_location.timezone`
+
+OpenAI-only fields without an Anthropic equivalent, such as `search_context_size`, are ignored.
+
 ## 4. 流式事件
 
 Responses API 流式响应使用 SSE。常见事件包括：

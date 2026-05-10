@@ -103,12 +103,13 @@ func MessageToResponseWithOptions(msg anthropic.MessageResponse, responseID stri
 		switch block.Type {
 		case "text":
 			text.WriteString(block.Text)
+			annotations := annotationsAny(convertCitations(block.Citations))
 			resp.Output = append(resp.Output, openai.OutputItem{
 				ID:      fmt.Sprintf("%s_msg_%d", responseID, i),
 				Type:    "message",
 				Status:  "completed",
 				Role:    "assistant",
-				Content: []openai.ContentItem{{Type: "output_text", Text: block.Text, Annotations: []any{}}},
+				Content: []openai.ContentItem{{Type: "output_text", Text: block.Text, Annotations: annotations}},
 			})
 		case "thinking":
 			resp.Output = append(resp.Output, openai.OutputItem{
@@ -164,6 +165,21 @@ func MessageToResponseWithOptions(msg anthropic.MessageResponse, responseID stri
 				Name:      block.Name,
 				Arguments: args,
 			})
+		case "server_tool_use":
+			if block.Name == "web_search" {
+				toolUseID := block.ID
+				if toolUseID == "" {
+					toolUseID = fmt.Sprintf("%s_web_search_%d", responseID, i)
+					msg.Content[i].ID = toolUseID
+				}
+				resp.Output = append(resp.Output, openai.OutputItem{
+					ID:     toolUseID,
+					Type:   "web_search_call",
+					Status: "completed",
+				})
+			}
+		case "web_search_tool_result":
+			continue
 		}
 	}
 	resp.OutputText = text.String()
@@ -668,6 +684,36 @@ func displayType(typ string) string {
 	return typ
 }
 
+func convertCitations(citations []anthropic.Citation) []openai.Annotation {
+	if len(citations) == 0 {
+		return nil
+	}
+	out := make([]openai.Annotation, 0, len(citations))
+	for _, citation := range citations {
+		if citation.URL == "" && citation.Title == "" && citation.CitedText == "" {
+			continue
+		}
+		out = append(out, openai.Annotation{
+			Type:  "url_citation",
+			URL:   citation.URL,
+			Title: citation.Title,
+			Text:  citation.CitedText,
+		})
+	}
+	return out
+}
+
+func annotationsAny(annotations []openai.Annotation) []any {
+	if annotations == nil {
+		return []any{}
+	}
+	out := make([]any, 0, len(annotations))
+	for _, annotation := range annotations {
+		out = append(out, annotation)
+	}
+	return out
+}
+
 func convertTools(tools []openai.Tool) ([]anthropic.Tool, []string, error) {
 	out := make([]anthropic.Tool, 0, len(tools))
 	var betas []string
@@ -679,6 +725,14 @@ func convertTools(tools []openai.Tool) ([]anthropic.Tool, []string, error) {
 			}
 			out = append(out, computerTool)
 			betas = appendBeta(betas, "computer-use-2025-01-24")
+			continue
+		}
+		if tool.Type == "web_search" || tool.Type == "web_search_preview" {
+			webTool, err := convertWebSearchTool(tool)
+			if err != nil {
+				return nil, nil, err
+			}
+			out = append(out, webTool)
 			continue
 		}
 		if tool.Type != "function" && tool.Type != "custom" && !(tool.Type == "" && tool.Function != nil) {
@@ -705,6 +759,44 @@ func convertTools(tools []openai.Tool) ([]anthropic.Tool, []string, error) {
 		out = append(out, anthropic.Tool{Name: name, Description: description, InputSchema: json.RawMessage(params)})
 	}
 	return out, betas, nil
+}
+
+func convertWebSearchTool(tool openai.Tool) (anthropic.Tool, error) {
+	var spec struct {
+		MaxUses        int      `json:"max_uses"`
+		AllowedDomains []string `json:"allowed_domains"`
+		BlockedDomains []string `json:"blocked_domains"`
+		Filters        struct {
+			AllowedDomains []string `json:"allowed_domains"`
+			BlockedDomains []string `json:"blocked_domains"`
+		} `json:"filters"`
+		UserLocation *anthropic.UserLocation `json:"user_location"`
+	}
+	if len(tool.Raw) != 0 {
+		if err := json.Unmarshal(tool.Raw, &spec); err != nil {
+			return anthropic.Tool{}, &InputError{Message: "invalid web_search tool", Code: "invalid_tool"}
+		}
+	}
+	allowed := spec.AllowedDomains
+	if len(spec.Filters.AllowedDomains) > 0 {
+		allowed = spec.Filters.AllowedDomains
+	}
+	blocked := spec.BlockedDomains
+	if len(spec.Filters.BlockedDomains) > 0 {
+		blocked = spec.Filters.BlockedDomains
+	}
+	out := anthropic.Tool{
+		Type:           "web_search_20250305",
+		Name:           "web_search",
+		MaxUses:        spec.MaxUses,
+		AllowedDomains: allowed,
+		BlockedDomains: blocked,
+		UserLocation:   spec.UserLocation,
+	}
+	if out.UserLocation != nil && out.UserLocation.Type == "" {
+		out.UserLocation.Type = "approximate"
+	}
+	return out, nil
 }
 
 func convertComputerTool(tool openai.Tool) (anthropic.Tool, error) {
@@ -767,6 +859,9 @@ func convertToolChoice(raw openai.RawJSON, parallelToolCalls *bool, hasTools boo
 		Type string `json:"type"`
 		Name string `json:"name"`
 		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && (obj.Type == "web_search" || obj.Type == "web_search_preview") {
+		return &anthropic.ToolChoice{Type: "tool", Name: "web_search", DisableParallelToolUse: disableParallel}
 	}
 	if err := json.Unmarshal(raw, &obj); err == nil && (obj.Type == "function" || obj.Type == "custom") && obj.Name != "" {
 		return &anthropic.ToolChoice{Type: "tool", Name: obj.Name, DisableParallelToolUse: disableParallel}

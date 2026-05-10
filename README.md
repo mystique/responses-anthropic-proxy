@@ -61,6 +61,7 @@ Implemented:
 - `POST /v1/responses/{response_id}/cancel` for queued/in-progress local records
 - Non-streaming and SSE streaming responses
 - Function tools and `tool_use` / `function_call_output` loops
+- Web search tools via Anthropic server-side web search
 - In-memory `previous_response_id` transcript continuation with 24 hour TTL
 - Tool-call ID compatibility between OpenAI Responses and Anthropic Messages
 - Detailed upstream error diagnostics for compatibility debugging

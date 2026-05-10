@@ -108,6 +108,13 @@ type ContentItem struct {
 	Annotations []any  `json:"annotations,omitempty"`
 }
 
+type Annotation struct {
+	Type  string `json:"type,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Title string `json:"title,omitempty"`
+	Text  string `json:"text,omitempty"`
+}
+
 type ReasoningSummaryItem struct {
 	Type string `json:"type"`
 	Text string `json:"text"`

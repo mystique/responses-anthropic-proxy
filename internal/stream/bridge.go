@@ -17,14 +17,25 @@ type toolState struct {
 }
 
 type textState struct {
-	ID   string
-	Text strings.Builder
+	ID        string
+	Text      strings.Builder
+	Citations []anthropic.Citation
 }
 
 type thinkingState struct {
 	ID        string
 	Thinking  strings.Builder
 	Signature string
+}
+
+type serverToolState struct {
+	ID    string
+	Name  string
+	Input json.RawMessage
+}
+
+type blockState struct {
+	Block anthropic.ContentBlock
 }
 
 func Bridge(r io.Reader, w io.Writer, responseID string, createdAt int64) error {
@@ -42,6 +53,8 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 	tools := map[int]*toolState{}
 	text := map[int]*textState{}
 	thinking := map[int]*thinkingState{}
+	serverTools := map[int]*serverToolState{}
+	blockResults := map[int]*blockState{}
 	var blocks []anthropic.ContentBlock
 	scanner := bufio.NewScanner(r)
 	var dataLines []string
@@ -49,7 +62,7 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 		line := scanner.Text()
 		if line == "" {
 			var err error
-			blocks, err = handleSSEData(w, responseID, createdAt, strings.Join(dataLines, "\n"), tools, text, thinking, blocks)
+			blocks, err = handleSSEData(w, responseID, createdAt, strings.Join(dataLines, "\n"), tools, text, thinking, serverTools, blockResults, blocks)
 			if err != nil {
 				return anthropic.MessageParam{}, err
 			}
@@ -62,7 +75,7 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 	}
 	if len(dataLines) > 0 {
 		var err error
-		blocks, err = handleSSEData(w, responseID, createdAt, strings.Join(dataLines, "\n"), tools, text, thinking, blocks)
+		blocks, err = handleSSEData(w, responseID, createdAt, strings.Join(dataLines, "\n"), tools, text, thinking, serverTools, blockResults, blocks)
 		if err != nil {
 			return anthropic.MessageParam{}, err
 		}
@@ -73,7 +86,7 @@ func BridgeWithResult(r io.Reader, w io.Writer, responseID string, createdAt int
 	return anthropic.MessageParam{Role: "assistant", Content: blocks}, nil
 }
 
-func handleSSEData(w io.Writer, responseID string, createdAt int64, data string, tools map[int]*toolState, text map[int]*textState, thinking map[int]*thinkingState, blocks []anthropic.ContentBlock) ([]anthropic.ContentBlock, error) {
+func handleSSEData(w io.Writer, responseID string, createdAt int64, data string, tools map[int]*toolState, text map[int]*textState, thinking map[int]*thinkingState, serverTools map[int]*serverToolState, blockResults map[int]*blockState, blocks []anthropic.ContentBlock) ([]anthropic.ContentBlock, error) {
 	if strings.TrimSpace(data) == "" || strings.TrimSpace(data) == "[DONE]" {
 		return blocks, nil
 	}
@@ -84,7 +97,7 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 	switch event.Type {
 	case "content_block_start":
 		if event.ContentBlock != nil && event.ContentBlock.Type == "text" {
-			state := &textState{ID: fmt.Sprintf("%s_msg_%d", responseID, event.Index)}
+			state := &textState{ID: fmt.Sprintf("%s_msg_%d", responseID, event.Index), Citations: event.ContentBlock.Citations}
 			text[event.Index] = state
 			if err := writeEvent(w, map[string]any{
 				"type":         "response.output_item.added",
@@ -114,6 +127,27 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 			}); err != nil {
 				return blocks, err
 			}
+		}
+		if event.ContentBlock != nil && event.ContentBlock.Type == "server_tool_use" && event.ContentBlock.Name == "web_search" {
+			id := event.ContentBlock.ID
+			if id == "" {
+				id = fmt.Sprintf("%s_web_search_%d", responseID, event.Index)
+			}
+			serverTools[event.Index] = &serverToolState{ID: id, Name: "web_search", Input: event.ContentBlock.Input}
+			return blocks, writeEvent(w, map[string]any{
+				"type":         "response.output_item.added",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":     id,
+					"type":   "web_search_call",
+					"status": "in_progress",
+				},
+			})
+		}
+		if event.ContentBlock != nil && event.ContentBlock.Type == "web_search_tool_result" {
+			blockResults[event.Index] = &blockState{Block: *event.ContentBlock}
+			return blocks, nil
 		}
 		if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
 			id := event.ContentBlock.ID
@@ -245,6 +279,23 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 			thinking[event.Index].Signature += event.Delta.Signature
 		}
 	case "content_block_stop":
+		if state := serverTools[event.Index]; state != nil {
+			blocks = append(blocks, anthropic.ContentBlock{Type: "server_tool_use", ID: state.ID, Name: state.Name, Input: state.Input})
+			return blocks, writeEvent(w, map[string]any{
+				"type":         "response.output_item.done",
+				"response_id":  responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":     state.ID,
+					"type":   "web_search_call",
+					"status": "completed",
+				},
+			})
+		}
+		if state := blockResults[event.Index]; state != nil {
+			blocks = append(blocks, state.Block)
+			return blocks, nil
+		}
 		if state := tools[event.Index]; state != nil {
 			args := state.Arguments.String()
 			if args == "" {
@@ -295,7 +346,8 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 		}
 		if state := text[event.Index]; state != nil {
 			finalText := state.Text.String()
-			blocks = append(blocks, anthropic.ContentBlock{Type: "text", Text: finalText})
+			annotations := convertCitationsForStream(state.Citations)
+			blocks = append(blocks, anthropic.ContentBlock{Type: "text", Text: finalText, Citations: state.Citations})
 			if err := writeEvent(w, map[string]any{
 				"type":          "response.output_text.done",
 				"response_id":   responseID,
@@ -315,7 +367,7 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 				"part": map[string]any{
 					"type":        "output_text",
 					"text":        finalText,
-					"annotations": []any{},
+					"annotations": annotations,
 				},
 			}); err != nil {
 				return blocks, err
@@ -332,7 +384,7 @@ func handleSSEData(w io.Writer, responseID string, createdAt int64, data string,
 					"content": []any{map[string]any{
 						"type":        "output_text",
 						"text":        finalText,
-						"annotations": []any{},
+						"annotations": annotations,
 					}},
 				},
 			})
@@ -431,6 +483,25 @@ func convertComputerAction(raw json.RawMessage) (any, error) {
 		}
 		return out, nil
 	}
+}
+
+func convertCitationsForStream(citations []anthropic.Citation) []any {
+	out := make([]any, 0, len(citations))
+	for _, citation := range citations {
+		if citation.URL == "" && citation.Title == "" && citation.CitedText == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"type":  "url_citation",
+			"url":   citation.URL,
+			"title": citation.Title,
+			"text":  citation.CitedText,
+		})
+	}
+	if len(out) == 0 {
+		return []any{}
+	}
+	return out
 }
 
 func writeEvent(w io.Writer, payload map[string]any) error {

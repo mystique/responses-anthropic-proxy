@@ -85,3 +85,13 @@ type MessageParam = {
 - `system`：顶层系统提示；Messages API 不接受 role 为 `system` 的 message。
 - `temperature`：0 到 1；即使为 0 也不保证完全确定。
 - `top_p`：nucleus sampling，高级场景使用。
+
+### Web search server tool
+
+OpenAI `web_search` and `web_search_preview` map to:
+
+```json
+{"type":"web_search_20250305","name":"web_search"}
+```
+
+Anthropic response blocks `server_tool_use` and `web_search_tool_result` are preserved in stored transcript history so `previous_response_id` continuation can send valid Messages history back upstream.

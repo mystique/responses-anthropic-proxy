@@ -166,24 +166,28 @@ func TestCreateResponseToMessageMapsStopAndTextFormat(t *testing.T) {
 }
 
 func TestCreateResponseToMessageRejectsUnsupportedToolType(t *testing.T) {
-	req := openai.CreateResponseRequest{
-		Input: openai.RawJSON(`"Hello"`),
-		Tools: []openai.Tool{{
-			Type: "file_search_preview",
-		}},
-	}
+	for _, toolType := range []string{"file_search_preview", "unknown_preview"} {
+		t.Run(toolType, func(t *testing.T) {
+			req := openai.CreateResponseRequest{
+				Input: openai.RawJSON(`"Hello"`),
+				Tools: []openai.Tool{{
+					Type: toolType,
+				}},
+			}
 
-	_, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+			_, err := convert.CreateResponseToMessage(req, nil, "claude-test")
 
-	var inputErr *convert.InputError
-	if err == nil || !errors.As(err, &inputErr) {
-		t.Fatalf("expected InputError, got %T %v", err, err)
-	}
-	if inputErr.Code != "unsupported_tool_type" {
-		t.Fatalf("unexpected error code: %q", inputErr.Code)
-	}
-	if !strings.Contains(inputErr.Message, "file_search_preview") {
-		t.Fatalf("error should name unsupported tool type, got %q", inputErr.Message)
+			var inputErr *convert.InputError
+			if err == nil || !errors.As(err, &inputErr) {
+				t.Fatalf("expected InputError, got %T %v", err, err)
+			}
+			if inputErr.Code != "unsupported_tool_type" {
+				t.Fatalf("unexpected error code: %q", inputErr.Code)
+			}
+			if !strings.Contains(inputErr.Message, toolType) {
+				t.Fatalf("error should name unsupported tool type, got %q", inputErr.Message)
+			}
+		})
 	}
 }
 
@@ -258,6 +262,123 @@ func TestCreateResponseToMessageMapsComputerUsePreviewTool(t *testing.T) {
 	}
 	if len(got.Betas) != 1 || got.Betas[0] != "computer-use-2025-01-24" {
 		t.Fatalf("computer beta not set: %+v", got.Betas)
+	}
+}
+
+func TestCreateResponseToMessageMapsWebSearchToolFields(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`"Search the web"`),
+		Tools: []openai.Tool{{
+			Type: "web_search",
+			Raw: json.RawMessage(`{
+				"type":"web_search",
+				"max_uses":3,
+				"filters":{"allowed_domains":["example.com"],"blocked_domains":["blocked.example"]},
+				"user_location":{"type":"approximate","city":"San Francisco","region":"California","country":"US","timezone":"America/Los_Angeles"},
+				"search_context_size":"medium"
+			}`),
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("expected one tool, got %+v", got.Tools)
+	}
+	tool := got.Tools[0]
+	if tool.Type != "web_search_20250305" || tool.Name != "web_search" {
+		t.Fatalf("web search tool not mapped: %+v", tool)
+	}
+	if tool.MaxUses != 3 {
+		t.Fatalf("max_uses not mapped: %+v", tool)
+	}
+	if len(tool.AllowedDomains) != 1 || tool.AllowedDomains[0] != "example.com" {
+		t.Fatalf("allowed_domains not mapped: %+v", tool)
+	}
+	if len(tool.BlockedDomains) != 1 || tool.BlockedDomains[0] != "blocked.example" {
+		t.Fatalf("blocked_domains not mapped: %+v", tool)
+	}
+	if tool.UserLocation == nil || tool.UserLocation.City != "San Francisco" || tool.UserLocation.Country != "US" {
+		t.Fatalf("user_location not mapped: %+v", tool.UserLocation)
+	}
+}
+
+func TestCreateResponseToMessageMapsWebSearchPreviewAlias(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`"Search the web"`),
+		Tools: []openai.Tool{{
+			Type: "web_search_preview",
+			Raw:  json.RawMessage(`{"type":"web_search_preview"}`),
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+	if len(got.Tools) != 1 || got.Tools[0].Type != "web_search_20250305" || got.Tools[0].Name != "web_search" {
+		t.Fatalf("web_search_preview alias not mapped: %+v", got.Tools)
+	}
+}
+
+func TestCreateResponseToMessageMapsTopLevelWebSearchDomains(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`"Search the web"`),
+		Tools: []openai.Tool{{
+			Type: "web_search",
+			Raw:  json.RawMessage(`{"type":"web_search","allowed_domains":["example.com"],"blocked_domains":["blocked.example"]}`),
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+	if len(got.Tools[0].AllowedDomains) != 1 || got.Tools[0].AllowedDomains[0] != "example.com" {
+		t.Fatalf("top-level allowed_domains not mapped: %+v", got.Tools[0])
+	}
+	if len(got.Tools[0].BlockedDomains) != 1 || got.Tools[0].BlockedDomains[0] != "blocked.example" {
+		t.Fatalf("top-level blocked_domains not mapped: %+v", got.Tools[0])
+	}
+}
+
+func TestCreateResponseToMessageMapsWebSearchToolChoice(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input:      openai.RawJSON(`"Search the web"`),
+		ToolChoice: openai.RawJSON(`{"type":"web_search"}`),
+		Tools: []openai.Tool{{
+			Type: "web_search",
+			Raw:  json.RawMessage(`{"type":"web_search"}`),
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+	if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != "web_search" {
+		t.Fatalf("web_search tool choice not mapped: %+v", got.ToolChoice)
+	}
+}
+
+func TestCreateResponseToMessageMapsWebSearchPreviewToolChoice(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input:      openai.RawJSON(`"Search the web"`),
+		ToolChoice: openai.RawJSON(`{"type":"web_search_preview"}`),
+		Tools: []openai.Tool{{
+			Type: "web_search_preview",
+			Raw:  json.RawMessage(`{"type":"web_search_preview"}`),
+		}},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+	if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != "web_search" {
+		t.Fatalf("web_search_preview tool choice not mapped: %+v", got.ToolChoice)
 	}
 }
 
@@ -686,6 +807,62 @@ func TestMessageToResponseWithIncludeControlsEncryptedReasoning(t *testing.T) {
 	}
 	if got.Output[0].EncryptedContent != "sig_123" {
 		t.Fatalf("encrypted reasoning should be included when requested: %+v", got.Output[0])
+	}
+}
+
+func TestMessageToResponseConvertsWebSearchBlocks(t *testing.T) {
+	msg := anthropic.MessageResponse{
+		ID:         "msg_123",
+		Model:      "claude-test",
+		Role:       "assistant",
+		StopReason: "end_turn",
+		Content: []anthropic.ContentBlock{{
+			Type:  "server_tool_use",
+			ID:    "srvtoolu_123",
+			Name:  "web_search",
+			Input: json.RawMessage(`{"query":"OpenAI news"}`),
+		}, {
+			Type:      "web_search_tool_result",
+			ToolUseID: "srvtoolu_123",
+			Content: []any{map[string]any{
+				"type":  "web_search_result",
+				"title": "OpenAI News",
+				"url":   "https://example.com/openai",
+			}},
+		}, {
+			Type: "text",
+			Text: "OpenAI announced news.",
+			Citations: []anthropic.Citation{{
+				Type:      "web_search_result_location",
+				URL:       "https://example.com/openai",
+				Title:     "OpenAI News",
+				CitedText: "OpenAI announced news.",
+			}},
+		}},
+	}
+
+	got, transcript, err := convert.MessageToResponse(msg, "resp_123", 111)
+	if err != nil {
+		t.Fatalf("MessageToResponse returned error: %v", err)
+	}
+	if len(got.Output) != 2 {
+		t.Fatalf("expected web_search_call and message output, got %+v", got.Output)
+	}
+	if got.Output[0].Type != "web_search_call" || got.Output[0].ID != "srvtoolu_123" || got.Output[0].Status != "completed" {
+		t.Fatalf("server_tool_use not converted to web_search_call: %+v", got.Output[0])
+	}
+	if len(got.Output[1].Content) != 1 || len(got.Output[1].Content[0].Annotations) != 1 {
+		t.Fatalf("citation annotations not mapped: %+v", got.Output[1])
+	}
+	annotation, ok := got.Output[1].Content[0].Annotations[0].(openai.Annotation)
+	if !ok {
+		t.Fatalf("citation annotation has unexpected type: %+v", got.Output[1].Content[0].Annotations[0])
+	}
+	if annotation.URL != "https://example.com/openai" {
+		t.Fatalf("citation URL not mapped: %+v", annotation)
+	}
+	if len(transcript) != 1 || len(transcript[0].Content) != 3 || transcript[0].Content[1].Type != "web_search_tool_result" {
+		t.Fatalf("web search blocks not preserved in transcript: %+v", transcript)
 	}
 }
 

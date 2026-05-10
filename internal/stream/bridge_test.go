@@ -235,6 +235,45 @@ func TestBridgeThinkingStreamReturnsReasoningEventsAndTranscript(t *testing.T) {
 	}
 }
 
+func TestBridgeWebSearchStream(t *testing.T) {
+	input := strings.NewReader(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null}}`,
+		``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_123","name":"web_search","input":{"query":"OpenAI news"}}}`,
+		``,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_123","content":[{"type":"web_search_result","title":"OpenAI News","url":"https://example.com/openai"}]}}`,
+		``,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":"","citations":[{"type":"web_search_result_location","url":"https://example.com/openai","title":"OpenAI News","cited_text":"OpenAI news"}]}}`,
+		``,
+		`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"OpenAI news"}}`,
+		``,
+		`data: {"type":"content_block_stop","index":2}`,
+		``,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n"))
+
+	var out bytes.Buffer
+	transcript, err := stream.BridgeWithResult(input, &out, "resp_123", 111)
+	if err != nil {
+		t.Fatalf("BridgeWithResult returned error: %v", err)
+	}
+	body := out.String()
+	if !strings.Contains(body, `"type":"web_search_call"`) {
+		t.Fatalf("web_search_call event missing:\n%s", body)
+	}
+	if !strings.Contains(body, `"url":"https://example.com/openai"`) {
+		t.Fatalf("citation annotation missing:\n%s", body)
+	}
+	if len(transcript.Content) != 3 || transcript.Content[0].Type != "server_tool_use" || transcript.Content[1].Type != "web_search_tool_result" {
+		t.Fatalf("web search transcript blocks not preserved: %+v", transcript)
+	}
+}
+
 func TestBridgeWithResultReturnsAssistantTranscript(t *testing.T) {
 	input := strings.NewReader(strings.Join([]string{
 		`event: content_block_start`,
