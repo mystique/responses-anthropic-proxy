@@ -197,6 +197,48 @@ func TestResponsesHandlerForwardsCustomToolAsAnthropicTool(t *testing.T) {
 	}
 }
 
+func TestResponsesHandlerSkipsNamespaceTools(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"ok"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"input":"hi",
+		"tools":[
+			{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+			{"type":"namespace","name":"mcp__lightpanda__","description":"Browser namespace"}
+		]
+	}`))
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	tools, ok := upstreamBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected one upstream tool, got %+v", upstreamBody["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["name"] != "exec_command" {
+		t.Fatalf("namespace tool should not be forwarded upstream: %+v", tools)
+	}
+}
+
 func TestResponsesHandlerForwardsWebSearchTool(t *testing.T) {
 	var upstreamBody map[string]any
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

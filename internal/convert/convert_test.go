@@ -238,6 +238,33 @@ func TestCreateResponseToMessageMapsCustomToolChoiceToForcedTool(t *testing.T) {
 	}
 }
 
+func TestCreateResponseToMessageIgnoresNamespaceTools(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`"List files"`),
+		Tools: []openai.Tool{
+			{
+				Type:        "function",
+				Name:        "exec_command",
+				Description: "Runs a shell command",
+				Parameters:  openai.RawJSON(`{"type":"object","properties":{"cmd":{"type":"string"}}}`),
+			},
+			{
+				Type: "namespace",
+				Name: "mcp__lightpanda__",
+			},
+		},
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	if len(got.Tools) != 1 || got.Tools[0].Name != "exec_command" {
+		t.Fatalf("namespace tool should be skipped without dropping callable tools: %+v", got.Tools)
+	}
+}
+
 func TestCreateResponseToMessageMapsComputerUsePreviewTool(t *testing.T) {
 	req := openai.CreateResponseRequest{
 		Input: openai.RawJSON(`"Use the browser"`),
@@ -526,6 +553,32 @@ func TestCreateResponseToMessageRejectsUnsupportedInputType(t *testing.T) {
 	}
 	if !strings.Contains(inputErr.Message, "codex_future_item") {
 		t.Fatalf("error should name unsupported input type, got %q", inputErr.Message)
+	}
+}
+
+func TestCreateResponseToMessageIgnoresReasoningInputItems(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[
+			{
+				"type":"reasoning",
+				"summary":[{"type":"summary_text","text":"considering options"}],
+				"content":[{"type":"reasoning_text","text":"considering options"}],
+				"encrypted_content":"sig_123"
+			},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue"}]}
+		]`),
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	if len(got.Messages) != 1 {
+		t.Fatalf("expected only the user message to be converted, got %+v", got.Messages)
+	}
+	if got.Messages[0].Role != "user" || len(got.Messages[0].Content) != 1 || got.Messages[0].Content[0].Text != "Continue" {
+		t.Fatalf("unexpected converted messages: %+v", got.Messages)
 	}
 }
 

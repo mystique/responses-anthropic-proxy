@@ -281,6 +281,8 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 				return nil, err
 			}
 			pendingUser = append(pendingUser, block)
+		case "reasoning":
+			continue
 		default:
 			return nil, &InputError{Message: "unsupported input type: " + displayType(item.Type), Code: "unsupported_input_type"}
 		}
@@ -718,6 +720,9 @@ func convertTools(tools []openai.Tool) ([]anthropic.Tool, []string, error) {
 	out := make([]anthropic.Tool, 0, len(tools))
 	var betas []string
 	for _, tool := range tools {
+		if tool.Type == "namespace" {
+			continue
+		}
 		if tool.Type == "computer_use_preview" {
 			computerTool, err := convertComputerTool(tool)
 			if err != nil {
