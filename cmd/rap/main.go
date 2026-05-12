@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -16,14 +17,14 @@ import (
 func main() {
 	loadProjectDotEnv()
 
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
+	configPath, _ := findRuntimeConfig(".")
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if cfg.AnthropicAPIKey == "" {
 		log.Fatal("ANTHROPIC_API_KEY is required")
 	}
-	model := envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-	baseURL := envOrDefault("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-	addr := envOrDefault("PROXY_ADDR", "127.0.0.1:8180")
-
 	store := state.NewStore(24 * time.Hour)
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -33,23 +34,72 @@ func main() {
 		}
 	}()
 
-	handler := server.New(server.Config{
-		AnthropicAPIKey:  apiKey,
-		AnthropicModel:   model,
-		AnthropicBaseURL: baseURL,
-	}, store, http.DefaultClient)
+	handler := server.New(cfg, store, http.DefaultClient)
 
-	log.Printf("listening on http://%s", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	log.Printf("listening on http://%s", cfg.ListenAddr)
+	if err := http.ListenAndServe(cfg.ListenAddr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func envOrDefault(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+type runtimeConfigFile struct {
+	Upstream struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	} `json:"upstream"`
+	Service struct {
+		APIKey     string `json:"api_key"`
+		ListenAddr string `json:"listen_addr"`
+	} `json:"service"`
+	Models         map[string]string `json:"models"`
+	ConfigPassword string            `json:"config_password"`
+	DefaultModel   string            `json:"default_model"`
+}
+
+func loadRuntimeConfig(path string) (server.Config, error) {
+	fileCfg := runtimeConfigFile{}
+	configPath := path
+	if configPath == "" {
+		configPath = "rap.config.json"
 	}
-	return fallback
+	if path != "" {
+		file, err := os.Open(path)
+		if err != nil {
+			return server.Config{}, err
+		}
+		defer file.Close()
+		if err := json.NewDecoder(file).Decode(&fileCfg); err != nil {
+			return server.Config{}, err
+		}
+	}
+
+	cfg := server.Config{
+		AnthropicAPIKey:  firstNonEmpty(os.Getenv("ANTHROPIC_API_KEY"), fileCfg.Upstream.APIKey),
+		ServiceAPIKey:    firstNonEmpty(os.Getenv("RAP_API_KEY"), fileCfg.Service.APIKey),
+		AnthropicModel:   firstNonEmpty(os.Getenv("ANTHROPIC_MODEL"), fileCfg.DefaultModel, "claude-sonnet-4-6"),
+		AnthropicBaseURL: firstNonEmpty(os.Getenv("ANTHROPIC_BASE_URL"), fileCfg.Upstream.BaseURL, "https://api.anthropic.com"),
+		ListenAddr:       firstNonEmpty(os.Getenv("PROXY_ADDR"), fileCfg.Service.ListenAddr, "127.0.0.1:8180"),
+		ModelMap:         fileCfg.Models,
+		ConfigPath:       configPath,
+		ConfigPassword:   fileCfg.ConfigPassword,
+	}
+	return cfg, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func findRuntimeConfig(start string) (string, bool) {
+	if path := os.Getenv("RAP_CONFIG"); path != "" {
+		return path, true
+	}
+	return findFileUpwards(start, "rap.config.json")
 }
 
 func loadProjectDotEnv() {
@@ -68,9 +118,13 @@ func loadProjectDotEnv() {
 }
 
 func findDotEnv(start string) (string, bool) {
+	return findFileUpwards(start, ".env")
+}
+
+func findFileUpwards(start, name string) (string, bool) {
 	dir := filepath.Clean(start)
 	for {
-		path := filepath.Join(dir, ".env")
+		path := filepath.Join(dir, name)
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path, true
 		}

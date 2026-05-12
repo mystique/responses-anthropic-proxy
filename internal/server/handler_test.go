@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -43,8 +45,7 @@ func TestResponsesHandlerProxiesNonStreamingRequest(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt","instructions":"sys","input":"hi"}`))
-	req.Header.Set("authorization", "Bearer anything")
+	req := newResponsesRequest(strings.NewReader(`{"model":"gpt","instructions":"sys","input":"hi"}`))
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -64,6 +65,136 @@ func TestResponsesHandlerProxiesNonStreamingRequest(t *testing.T) {
 	}
 	if _, ok := resp["id"].(string); !ok {
 		t.Fatalf("missing response id: %+v", resp)
+	}
+}
+
+func TestResponsesHandlerMapsRequestedModel(t *testing.T) {
+	var upstreamBody map[string]any
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6",
+			"content":[{"type":"text","text":"hello"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-default",
+		AnthropicBaseURL: "http://anthropic.test",
+		ModelMap: map[string]string{
+			"gpt-5": "claude-sonnet-4-6",
+		},
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := newResponsesRequest(strings.NewReader(`{"model":"gpt-5","input":"hi"}`))
+	req.Header.Set("authorization", "Bearer anthropic-key")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if upstreamBody["model"] != "claude-sonnet-4-6" {
+		t.Fatalf("upstream model = %q, want mapped model", upstreamBody["model"])
+	}
+}
+
+func TestResponsesHandlerRejectsUnsupportedModelWithoutCallingUpstream(t *testing.T) {
+	var calls int
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		t.Fatalf("unsupported model should not call upstream")
+		return nil, nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-default",
+		AnthropicBaseURL: "http://anthropic.test",
+		ModelMap: map[string]string{
+			"gpt-5": "claude-sonnet-4-6",
+		},
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := newResponsesRequest(strings.NewReader(`{"model":"unknown-model","input":"hi"}`))
+	req.Header.Set("authorization", "Bearer anthropic-key")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"unsupported_model"`) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestResponsesHandlerRejectsMismatchedClientKeyWithoutCallingUpstream(t *testing.T) {
+	var calls int
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		t.Fatalf("invalid client key should not call upstream")
+		return nil, nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := newResponsesRequest(strings.NewReader(`{"model":"gpt","input":"hi"}`))
+	req.Header.Set("authorization", "Bearer wrong-key")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"invalid_api_key"`) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestResponsesHandlerAuthorizesWithServiceKeySeparateFromUpstreamKey(t *testing.T) {
+	var upstreamKey string
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamKey = r.Header.Get("x-api-key")
+		return jsonResponse(http.StatusOK, `{
+			"id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+			"content":[{"type":"text","text":"hello"}],
+			"stop_reason":"end_turn"
+		}`), nil
+	})}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "upstream-key",
+		ServiceAPIKey:    "service-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(24*time.Hour), httpClient)
+
+	req := newResponsesRequest(strings.NewReader(`{"model":"gpt","input":"hi"}`))
+	req.Header.Set("authorization", "Bearer service-key")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if upstreamKey != "upstream-key" {
+		t.Fatalf("upstream key = %q, want upstream-key", upstreamKey)
 	}
 }
 
@@ -100,11 +231,11 @@ func TestResponsesHandlerForwardsClientMetadataHeaders(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req := newResponsesRequest(strings.NewReader(`{"input":"hi"}`))
 	req.Header.Set("user-agent", "source-client/1.0")
 	req.Header.Set("x-forwarded-for", "203.0.113.10")
 	req.Header.Set("x-request-id", "req-source")
-	req.Header.Set("authorization", "Bearer source-token")
+	req.Header.Set("authorization", "Bearer anthropic-key")
 	req.Header.Set("x-api-key", "source-key")
 	req.Header.Set("anthropic-version", "2024-01-01")
 	rec := httptest.NewRecorder()
@@ -131,9 +262,9 @@ func TestResponsesHandlerRejectsUnsupportedToolTypeWithoutCallingUpstream(t *tes
 				AnthropicBaseURL: "http://anthropic.test",
 			}, state.NewStore(24*time.Hour), httpClient)
 
-			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+			req := newResponsesRequest(strings.NewReader(`{
 		"input":"hi",
-		"tools":[{"type":"`+toolType+`"}]
+		"tools":[{"type":"` + toolType + `"}]
 	}`))
 			rec := httptest.NewRecorder()
 
@@ -170,7 +301,7 @@ func TestResponsesHandlerForwardsCustomToolAsAnthropicTool(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	req := newResponsesRequest(strings.NewReader(`{
 		"input":"hi",
 		"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch"}]
 	}`))
@@ -215,7 +346,7 @@ func TestResponsesHandlerSkipsNamespaceTools(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	req := newResponsesRequest(strings.NewReader(`{
 		"input":"hi",
 		"tools":[
 			{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}},
@@ -261,7 +392,7 @@ func TestResponsesHandlerForwardsWebSearchTool(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	req := newResponsesRequest(strings.NewReader(`{
 		"input":"Search",
 		"tools":[{"type":"web_search","max_uses":2}]
 	}`))
@@ -299,7 +430,7 @@ func TestResponsesHandlerForwardsComputerUseBetaHeader(t *testing.T) {
 		AnthropicBaseURL: "http://anthropic.test",
 	}, state.NewStore(24*time.Hour), httpClient)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	req := newResponsesRequest(strings.NewReader(`{
 		"input":"hi",
 		"truncation":"auto",
 		"tools":[{"type":"computer_use_preview","display_width":1024,"display_height":768,"environment":"browser"}]
@@ -336,7 +467,7 @@ func TestResponsesHandlerUsesPreviousResponseIDTranscript(t *testing.T) {
 	}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp struct {
 		ID string `json:"id"`
 	}
@@ -345,7 +476,7 @@ func TestResponsesHandlerUsesPreviousResponseIDTranscript(t *testing.T) {
 	}
 
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"previous_response_id":"`+firstResp.ID+`","input":"second"}`)))
+	h.ServeHTTP(second, newResponsesRequest(strings.NewReader(`{"previous_response_id":"`+firstResp.ID+`","input":"second"}`)))
 
 	if second.Code != http.StatusOK {
 		t.Fatalf("unexpected second status %d: %s", second.Code, second.Body.String())
@@ -400,7 +531,7 @@ func TestResponsesHandlerStoresWebSearchTranscriptForContinuation(t *testing.T) 
 	}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{
 		"input":"Search",
 		"tools":[{"type":"web_search"}]
 	}`)))
@@ -413,7 +544,7 @@ func TestResponsesHandlerStoresWebSearchTranscriptForContinuation(t *testing.T) 
 	}
 
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(second, newResponsesRequest(strings.NewReader(`{
 		"previous_response_id":"`+firstResp.ID+`",
 		"input":"Continue"
 	}`)))
@@ -453,17 +584,17 @@ func TestResponsesHandlerSendsToolResultWithResolvedToolUseID(t *testing.T) {
 		}`), nil
 	})}
 	store := state.NewStore(24 * time.Hour)
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp openai.Response
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
 		t.Fatal(err)
 	}
 
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(second, newResponsesRequest(strings.NewReader(`{
 		"previous_response_id":"`+firstResp.ID+`",
 		"input":[{"type":"function_call_output","call_id":"`+firstResp.Output[0].CallID+`","output":"{\"ok\":true}"}]
 	}`)))
@@ -506,10 +637,10 @@ func TestResponsesHandlerSendsComputerCallOutputWithResolvedToolUseID(t *testing
 		}`), nil
 	})}
 	store := state.NewStore(24 * time.Hour)
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp openai.Response
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
 		t.Fatal(err)
@@ -519,7 +650,7 @@ func TestResponsesHandlerSendsComputerCallOutputWithResolvedToolUseID(t *testing
 	}
 
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(second, newResponsesRequest(strings.NewReader(`{
 		"previous_response_id":"`+firstResp.ID+`",
 		"input":[{"type":"computer_call_output","call_id":"`+firstResp.Output[0].CallID+`","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,abc"}}]
 	}`)))
@@ -553,17 +684,17 @@ func TestResponsesHandlerRestoresHistoryForUniqueCallIDWithoutPreviousResponseID
 		}
 		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
 	})}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp openai.Response
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
 		t.Fatal(err)
 	}
 
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(second, newResponsesRequest(strings.NewReader(`{
 		"input":[{"type":"function_call_output","call_id":"`+firstResp.Output[0].CallID+`","output":"ok"}]
 	}`)))
 
@@ -583,10 +714,10 @@ func TestResponsesHandlerAcceptsInlineFunctionCallOutputWithoutPreviousResponseI
 		}
 		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
 	})}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(rec, newResponsesRequest(strings.NewReader(`{
 		"input":[
 			{"type":"function_call","call_id":"call_123","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
 			{"type":"function_call_output","call_id":"call_123","output":"ok"}
@@ -620,10 +751,10 @@ func TestResponsesHandlerKeepsMultipleInlineFunctionCallsAdjacentToResults(t *te
 		}
 		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
 	})}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(rec, newResponsesRequest(strings.NewReader(`{
 		"input":[
 			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
 			{"type":"function_call","call_id":"call_2","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
@@ -673,10 +804,10 @@ func TestResponsesHandlerReturnsLocalErrorForMissingToolCall(t *testing.T) {
 		called = true
 		return jsonResponse(http.StatusOK, `{}`), nil
 	})}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(rec, newResponsesRequest(strings.NewReader(`{
 		"input":[{"type":"function_call_output","call_id":"missing","output":"ok"}]
 	}`)))
 
@@ -717,10 +848,10 @@ func TestResponsesHandlerReturnsAmbiguousToolCallWithoutPreviousResponseID(t *te
 			CreatedAt: 123,
 		})
 	}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, http.DefaultClient)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+	h.ServeHTTP(rec, newResponsesRequest(strings.NewReader(`{
 		"input":[{"type":"function_call_output","call_id":"call_same","output":"ok"}]
 	}`)))
 
@@ -746,23 +877,23 @@ func TestResponsesHandlerRejectsDuplicateToolCallOutput(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`), nil
 	})}
 	store := state.NewStore(24 * time.Hour)
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp openai.Response
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"previous_response_id":"` + firstResp.ID + `","input":[{"type":"function_call_output","call_id":"` + firstResp.Output[0].CallID + `","output":"ok"}]}`
 	okRec := httptest.NewRecorder()
-	h.ServeHTTP(okRec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	h.ServeHTTP(okRec, newResponsesRequest(strings.NewReader(body)))
 	if okRec.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d: %s", okRec.Code, okRec.Body.String())
 	}
 
 	dup := httptest.NewRecorder()
-	h.ServeHTTP(dup, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	h.ServeHTTP(dup, newResponsesRequest(strings.NewReader(body)))
 	if dup.Code != http.StatusBadRequest {
 		t.Fatalf("unexpected duplicate status %d: %s", dup.Code, dup.Body.String())
 	}
@@ -784,10 +915,10 @@ func TestResponsesHandlerMapsAnthropicInvalidRequestTo400(t *testing.T) {
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"bad tool result"}}`), nil
 	})}
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, state.NewStore(24*time.Hour), httpClient)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`)))
+	h.ServeHTTP(rec, newResponsesRequest(strings.NewReader(`{"input":"hi"}`)))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
@@ -827,7 +958,7 @@ func TestResponsesHandlerRetrievesStoredResponse(t *testing.T) {
 	}, state.NewStore(24*time.Hour), httpClient)
 
 	create := httptest.NewRecorder()
-	h.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`)))
+	h.ServeHTTP(create, newResponsesRequest(strings.NewReader(`{"input":"hi"}`)))
 	var created struct {
 		ID string `json:"id"`
 	}
@@ -854,7 +985,7 @@ func TestResponsesHandlerDeletesStoredResponse(t *testing.T) {
 	store := state.NewStore(24 * time.Hour)
 	resp := openai.NewBaseResponse("resp_1", "claude-test", "completed", 123)
 	store.Save(state.ResponseRecord{ID: "resp_1", Response: resp, Status: "completed", CreatedAt: 123})
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
 
 	del := httptest.NewRecorder()
 	h.ServeHTTP(del, httptest.NewRequest(http.MethodDelete, "/v1/responses/resp_1", nil))
@@ -874,7 +1005,7 @@ func TestResponsesHandlerDeletesStoredResponse(t *testing.T) {
 }
 
 func TestResponsesHandlerDeleteMissingResponseReturns404(t *testing.T) {
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/v1/responses/resp_missing", nil))
@@ -916,7 +1047,7 @@ func TestResponsesHandlerRetrievesStreamedResponse(t *testing.T) {
 	}, state.NewStore(24*time.Hour), httpClient)
 
 	create := httptest.NewRecorder()
-	h.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi","stream":true}`)))
+	h.ServeHTTP(create, newResponsesRequest(strings.NewReader(`{"input":"hi","stream":true}`)))
 	var responseID string
 	for _, line := range strings.Split(create.Body.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
@@ -974,23 +1105,23 @@ func TestResponsesHandlerStreamsToolResultFollowupAndMarksResolved(t *testing.T)
 		}, nil
 	})}
 	store := state.NewStore(24 * time.Hour)
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "claude-test", AnthropicBaseURL: "http://anthropic.test"}, store, httpClient)
 
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`)))
+	h.ServeHTTP(first, newResponsesRequest(strings.NewReader(`{"input":"first"}`)))
 	var firstResp openai.Response
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"previous_response_id":"` + firstResp.ID + `","stream":true,"input":[{"type":"function_call_output","call_id":"` + firstResp.Output[0].CallID + `","output":"ok"}]}`
 	streamRec := httptest.NewRecorder()
-	h.ServeHTTP(streamRec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	h.ServeHTTP(streamRec, newResponsesRequest(strings.NewReader(body)))
 	if streamRec.Code != http.StatusOK {
 		t.Fatalf("unexpected stream status %d: %s", streamRec.Code, streamRec.Body.String())
 	}
 
 	dup := httptest.NewRecorder()
-	h.ServeHTTP(dup, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	h.ServeHTTP(dup, newResponsesRequest(strings.NewReader(body)))
 	if dup.Code != http.StatusBadRequest {
 		t.Fatalf("unexpected duplicate status %d: %s", dup.Code, dup.Body.String())
 	}
@@ -1003,7 +1134,7 @@ func TestResponsesHandlerCancelsInProgressResponse(t *testing.T) {
 	store := state.NewStore(24 * time.Hour)
 	resp := openai.NewBaseResponse("resp_1", "claude-test", "in_progress", 123)
 	store.Save(state.ResponseRecord{ID: "resp_1", Response: resp, Status: "in_progress", CreatedAt: 123})
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses/resp_1/cancel", nil))
@@ -1020,7 +1151,7 @@ func TestResponsesHandlerCancelCompletedResponseReturns409(t *testing.T) {
 	store := state.NewStore(24 * time.Hour)
 	resp := openai.NewBaseResponse("resp_1", "claude-test", "completed", 123)
 	store.Save(state.ResponseRecord{ID: "resp_1", Response: resp, Status: "completed", CreatedAt: 123})
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, store, http.DefaultClient)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses/resp_1/cancel", nil))
@@ -1034,7 +1165,7 @@ func TestResponsesHandlerCancelCompletedResponseReturns409(t *testing.T) {
 }
 
 func TestUnknownEndpointReturnsOpenAIStyle404(t *testing.T) {
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/unknown", nil))
@@ -1048,7 +1179,7 @@ func TestUnknownEndpointReturnsOpenAIStyle404(t *testing.T) {
 }
 
 func TestResponsesCollectionWrongMethodReturns405(t *testing.T) {
-	h := server.New(server.Config{AnthropicAPIKey: "k", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
+	h := server.New(server.Config{AnthropicAPIKey: "anthropic-key", AnthropicModel: "m", AnthropicBaseURL: "http://example.test"}, state.NewStore(time.Hour), http.DefaultClient)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/responses", nil))
@@ -1058,6 +1189,133 @@ func TestResponsesCollectionWrongMethodReturns405(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"method_not_allowed"`) {
 		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+}
+
+func TestConfigPageIsAvailableWithoutPassword(t *testing.T) {
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+	}, state.NewStore(time.Hour), http.DefaultClient)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rap configuration") {
+		t.Fatalf("config page did not render expected title: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `name="upstream.api_key" type="password"`) || strings.Contains(rec.Body.String(), `name="service.api_key" type="password"`) {
+		t.Fatalf("config page should render API keys as plain text fields, not password inputs: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `id="model-mappings"`) || !strings.Contains(rec.Body.String(), `id="add-model-mapping"`) {
+		t.Fatalf("config page did not render row-based model mapping controls: %s", rec.Body.String())
+	}
+}
+
+func TestConfigPageRequiresConfiguredPassword(t *testing.T) {
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "anthropic-key",
+		AnthropicModel:   "claude-test",
+		AnthropicBaseURL: "http://anthropic.test",
+		ConfigPassword:   "secret",
+	}, state.NewStore(time.Hour), http.DefaultClient)
+
+	protected := httptest.NewRecorder()
+	h.ServeHTTP(protected, httptest.NewRequest(http.MethodGet, "/config/api", nil))
+	if protected.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API status = %d, want 401", protected.Code)
+	}
+
+	login := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/config/login", strings.NewReader("password=secret"))
+	loginReq.Header.Set("content-type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(login, loginReq)
+	if login.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303: %s", login.Code, login.Body.String())
+	}
+	if len(login.Result().Cookies()) == 0 {
+		t.Fatal("login did not set a session cookie")
+	}
+
+	authed := httptest.NewRecorder()
+	authedReq := httptest.NewRequest(http.MethodGet, "/config", nil)
+	authedReq.AddCookie(login.Result().Cookies()[0])
+	h.ServeHTTP(authed, authedReq)
+	if authed.Code != http.StatusOK {
+		t.Fatalf("authenticated config status = %d, want 200: %s", authed.Code, authed.Body.String())
+	}
+}
+
+func TestConfigAPIPreservesPasswordAndHidesItFromResponse(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "rap.config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+		"upstream": {
+			"base_url": "https://api.anthropic.com",
+			"api_key": "sk-ant-original"
+		},
+		"service": {
+			"api_key": "client-original",
+			"listen_addr": "127.0.0.1:8180"
+		},
+		"models": {
+			"gpt-5": "claude-sonnet-4-6"
+		},
+		"config_password": "keep-secret",
+		"default_model": "claude-sonnet-4-6"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := server.New(server.Config{
+		AnthropicAPIKey:  "sk-ant-original",
+		AnthropicModel:   "claude-sonnet-4-6",
+		AnthropicBaseURL: "https://api.anthropic.com",
+		ConfigPath:       configPath,
+	}, state.NewStore(time.Hour), http.DefaultClient)
+
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/config/api", nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200: %s", getRec.Code, getRec.Body.String())
+	}
+	if strings.Contains(getRec.Body.String(), "keep-secret") || strings.Contains(getRec.Body.String(), "config_password") {
+		t.Fatalf("GET leaked config password: %s", getRec.Body.String())
+	}
+
+	update := `{
+		"upstream": {
+			"base_url": "http://localhost:9000",
+			"api_key": "sk-ant-updated"
+		},
+		"service": {
+			"api_key": "client-updated",
+			"listen_addr": "127.0.0.1:8282"
+		},
+		"models": {
+			"gpt-5": "claude-sonnet-4-6",
+			"gpt-5-mini": "claude-haiku-4-6"
+		},
+		"default_model": "claude-sonnet-4-6"
+	}`
+	postRec := httptest.NewRecorder()
+	h.ServeHTTP(postRec, httptest.NewRequest(http.MethodPost, "/config/api", strings.NewReader(update)))
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200: %s", postRec.Code, postRec.Body.String())
+	}
+
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), `"config_password": "keep-secret"`) {
+		t.Fatalf("saved config did not preserve password: %s", string(written))
+	}
+	if !strings.Contains(string(written), `"listen_addr": "127.0.0.1:8282"`) {
+		t.Fatalf("saved config did not include update: %s", string(written))
 	}
 }
 
@@ -1073,4 +1331,10 @@ func jsonResponse(status int, body string) *http.Response {
 		Header:     http.Header{"content-type": []string{"application/json"}},
 		Body:       io.NopCloser(bytes.NewBufferString(body)),
 	}
+}
+
+func newResponsesRequest(body io.Reader) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("authorization", "Bearer anthropic-key")
+	return req
 }

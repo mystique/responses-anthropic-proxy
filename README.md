@@ -4,7 +4,9 @@ Local OpenAI Responses API compatibility proxy backed by Anthropic Messages.
 
 ## Run
 
-Create a local `.env` file in the project root:
+Create either a local `.env` file or a local `rap.config.json` file in the project root.
+
+For `.env`:
 
 ```sh
 ANTHROPIC_API_KEY=sk-ant-...
@@ -13,7 +15,36 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com
 PROXY_ADDR=127.0.0.1:8180
 ```
 
-The service loads `.env` automatically on startup. Existing shell environment variables take precedence over values in `.env`.
+For `rap.config.json`:
+
+```json
+{
+  "upstream": {
+    "base_url": "https://api.anthropic.com",
+    "api_key": "sk-ant-..."
+  },
+  "service": {
+    "api_key": "local-client-key",
+    "listen_addr": "127.0.0.1:8180"
+  },
+  "models": {
+    "gpt-5": "claude-sonnet-4-6",
+    "gpt-5-mini": "claude-haiku-4-6"
+  },
+  "config_password": "local-config-password",
+  "default_model": "claude-sonnet-4-6"
+}
+```
+
+The service loads `.env` and `rap.config.json` automatically on startup. Set `RAP_CONFIG=/path/to/rap.config.json` to use a config file outside the project tree. Existing shell environment variables take precedence over values in both local files. `config_password` is only used for the local configuration page and is never shown or edited by that page.
+
+Environment overrides:
+
+- `ANTHROPIC_API_KEY` overrides `upstream.api_key`
+- `ANTHROPIC_BASE_URL` overrides `upstream.base_url`
+- `ANTHROPIC_MODEL` overrides `default_model`
+- `RAP_API_KEY` overrides `service.api_key`
+- `PROXY_ADDR` overrides `service.listen_addr`
 
 Start directly:
 
@@ -29,6 +60,14 @@ Or use the helper script:
 
 The `.env` file is ignored by git and should not be committed.
 
+Open the local configuration page after startup:
+
+```text
+http://127.0.0.1:8180/config
+```
+
+If `config_password` is set in `rap.config.json`, the page requires that password before showing settings. If it is empty or omitted, the page opens without login. Saving writes `rap.config.json`; restart `rap` for saved changes to affect proxy behavior.
+
 Build the short command binary:
 
 ```sh
@@ -43,13 +82,15 @@ Defaults:
 
 `ANTHROPIC_API_KEY` is required.
 
+When `models` is configured, the OpenAI request `model` must match one of the configured keys. The mapped value is sent upstream as the Anthropic model. Unknown models return `400 unsupported_model` locally.
+
 Point Codex or another Responses API client at:
 
 ```text
 http://127.0.0.1:8180/v1
 ```
 
-The proxy accepts any client `Authorization` header and always authenticates upstream with `x-api-key` plus `anthropic-version: 2023-06-01`.
+Clients must send `Authorization: Bearer <service.api_key>`, matching the configured local service key exactly. If no local service key is configured, the proxy falls back to `ANTHROPIC_API_KEY` for backward compatibility. The proxy authenticates upstream with `x-api-key` plus `anthropic-version: 2023-06-01`.
 
 ## Scope
 
