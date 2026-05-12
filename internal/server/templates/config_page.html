@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rap configuration</title>
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f5;--panel:#fff;--text:#111;--muted:#6b6b6b;--line:#d8d8d0;--soft:#efefeb;--accent:#10a37f;--accent-press:#0d8f70;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#171717;--panel:#202020;--text:#f4f4f4;--muted:#a3a3a3;--line:#3a3a3a;--soft:#292929}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--panel) 84%,transparent);position:sticky;top:0;backdrop-filter:blur(14px)}
+.bar{max-width:1120px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.brand{font-weight:650;letter-spacing:0}
+.path{color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{max-width:1120px;margin:0 auto;padding:30px 24px 48px}
+.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:22px}
+h1{font-size:28px;line-height:1.15;margin:0 0 8px;font-weight:650;letter-spacing:0}
+p{margin:0;color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.section{padding:22px;border-top:1px solid var(--line)}
+.section:first-child{border-top:0}
+h2{font-size:15px;margin:0 0 16px;font-weight:650;letter-spacing:0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+label{display:block;font-size:13px;font-weight:550;margin-bottom:7px}
+input{width:100%;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text);padding:10px 12px;font:inherit}
+.actions{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:18px}
+.buttons{display:flex;gap:10px;align-items:center}
+button{border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--text);padding:9px 13px;font:inherit;font-weight:600;cursor:pointer}
+button.primary{border-color:var(--accent);background:var(--accent);color:white}
+button.primary:active{background:var(--accent-press)}
+button.danger{border-color:transparent;background:transparent;color:var(--danger);font-size:22px;line-height:1;padding:7px 8px}
+.status{color:var(--muted);font-size:13px}
+.status.error{color:var(--danger)}
+.note{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:var(--soft);color:var(--muted);font-size:13px;margin-bottom:18px}
+.mapping-list{display:grid;gap:12px}
+.mapping-row{display:grid;grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 40px;gap:12px;align-items:center}
+.arrow{color:#9aa1ad;text-align:center;font-size:24px}
+.add-mapping{width:100%;border:2px dashed #cfd5df;background:transparent;color:#4b5563;padding:12px;margin-top:18px}
+@media (max-width:760px){.grid,.intro{display:block}.grid{display:grid;grid-template-columns:1fr}.buttons{width:100%;justify-content:flex-start}.actions{align-items:flex-start;flex-direction:column}.mapping-row{grid-template-columns:1fr}.arrow{text-align:left}.danger{justify-self:start}}
+</style>
+</head>
+<body>
+<header>
+<div class="bar">
+<div class="brand">rap configuration</div>
+<div class="path">{{if .HasConfigFile}}{{.ConfigPath}}{{else}}No config file loaded{{end}}</div>
+</div>
+</header>
+<main>
+<div class="intro">
+<div>
+<h1>Settings</h1>
+<p>Changes are written to rap.config.json and take effect after restarting the service.</p>
+</div>
+<form method="post" action="/config/logout"><button type="submit">Sign out</button></form>
+</div>
+{{if not .HasConfigFile}}<div class="note">Saving requires RAP_CONFIG or an existing rap.config.json discovered at startup.</div>{{end}}
+<form id="config-form" class="panel">
+<div class="section">
+<h2>Upstream</h2>
+<div class="grid">
+<div><label for="upstream-base-url">Anthropic base URL</label><input id="upstream-base-url" name="upstream.base_url" autocomplete="off"></div>
+<div><label for="upstream-api-key">Anthropic API key</label><input id="upstream-api-key" name="upstream.api_key" autocomplete="off"></div>
+</div>
+</div>
+<div class="section">
+<h2>Service</h2>
+<div class="grid">
+<div><label for="service-api-key">Client API key</label><input id="service-api-key" name="service.api_key" autocomplete="off"></div>
+<div><label for="listen-addr">Listen address</label><input id="listen-addr" name="service.listen_addr" autocomplete="off"></div>
+</div>
+</div>
+<div class="section">
+<h2>Models</h2>
+<div><label for="default-model">Default Anthropic model</label><input id="default-model" name="default_model" autocomplete="off"></div>
+<div style="height:16px"></div>
+<div id="model-mappings" class="mapping-list" aria-label="OpenAI to Anthropic model mappings"></div>
+<button type="button" id="add-model-mapping" class="add-mapping">+ Add mapping</button>
+<div class="actions">
+<div id="status" class="status">Loading configuration...</div>
+<div class="buttons"><button type="button" id="reload">Reload</button><button class="primary" type="submit">Save changes</button></div>
+</div>
+</div>
+</form>
+</main>
+<script>
+const fields = {
+  baseURL: document.querySelector('[name="upstream.base_url"]'),
+  upstreamKey: document.querySelector('[name="upstream.api_key"]'),
+  serviceKey: document.querySelector('[name="service.api_key"]'),
+  listenAddr: document.querySelector('[name="service.listen_addr"]'),
+  defaultModel: document.querySelector('[name="default_model"]')
+};
+const mappingsEl = document.getElementById('model-mappings');
+const statusEl = document.getElementById('status');
+function setStatus(text, error=false){ statusEl.textContent = text; statusEl.className = error ? 'status error' : 'status'; }
+function addMappingRow(openaiModel='', anthropicModel=''){
+  const row = document.createElement('div');
+  row.className = 'mapping-row';
+  row.innerHTML = '<input name="model.openai" autocomplete="off" placeholder="gpt-5.5"><div class="arrow">→</div><input name="model.anthropic" autocomplete="off" placeholder="claude-sonnet-4-6"><button type="button" class="danger" aria-label="Remove mapping">⌫</button>';
+  row.querySelector('[name="model.openai"]').value = openaiModel;
+  row.querySelector('[name="model.anthropic"]').value = anthropicModel;
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  mappingsEl.appendChild(row);
+}
+function fillMappings(models){
+  mappingsEl.replaceChildren();
+  const entries = Object.entries(models || {});
+  if(entries.length === 0){ addMappingRow(); return; }
+  entries.forEach(([openaiModel, anthropicModel]) => addMappingRow(openaiModel, anthropicModel));
+}
+function readMappings(){
+  const models = {};
+  for(const row of mappingsEl.querySelectorAll('.mapping-row')){
+    const openaiModel = row.querySelector('[name="model.openai"]').value.trim();
+    const anthropicModel = row.querySelector('[name="model.anthropic"]').value.trim();
+    if(openaiModel || anthropicModel){
+      if(!openaiModel || !anthropicModel){ throw new Error('Each model mapping needs both sides.'); }
+      models[openaiModel] = anthropicModel;
+    }
+  }
+  return models;
+}
+function fill(cfg){
+  fields.baseURL.value = cfg.upstream?.base_url || '';
+  fields.upstreamKey.value = cfg.upstream?.api_key || '';
+  fields.serviceKey.value = cfg.service?.api_key || '';
+  fields.listenAddr.value = cfg.service?.listen_addr || '';
+  fields.defaultModel.value = cfg.default_model || '';
+  fillMappings(cfg.models || {});
+}
+async function loadConfig(){
+  setStatus('Loading configuration...');
+  const res = await fetch('/config/api');
+  if(!res.ok){ setStatus('Unable to load configuration.', true); return; }
+  fill(await res.json());
+  setStatus('Loaded. Save changes, then restart rap.');
+}
+document.getElementById('reload').addEventListener('click', loadConfig);
+document.getElementById('add-model-mapping').addEventListener('click', () => addMappingRow());
+document.getElementById('config-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  let models;
+  try { models = readMappings(); }
+  catch (error) { setStatus(error.message, true); return; }
+  const payload = {
+    upstream: { base_url: fields.baseURL.value.trim(), api_key: fields.upstreamKey.value.trim() },
+    service: { api_key: fields.serviceKey.value.trim(), listen_addr: fields.listenAddr.value.trim() },
+    models,
+    default_model: fields.defaultModel.value.trim()
+  };
+  const res = await fetch('/config/api', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(payload) });
+  if(!res.ok){ setStatus('Save failed: ' + await res.text(), true); return; }
+  fill(await res.json());
+  setStatus('Saved. Restart rap for changes to take effect.');
+});
+loadConfig();
+</script>
+</body>
+</html>
