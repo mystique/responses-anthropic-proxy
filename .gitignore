@@ -1,5 +1,26 @@
-.gocache/
-bin/
-*.test
+# Local configuration and secrets
 .env
+.env.*
+!.env.example
 rap.config.json
+*.local.json
+
+# Agent/editor local state
+.claude/
+.codex/
+
+# Build outputs
+bin/
+dist/
+rap
+
+# Go test/cache artifacts
+.gocache/
+*.test
+*.out
+coverage.out
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
