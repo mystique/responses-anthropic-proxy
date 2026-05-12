@@ -537,6 +537,26 @@ func TestCreateResponseToMessageConvertsFileAndDocumentInputsToText(t *testing.T
 	}
 }
 
+func TestCreateResponseToMessageConvertsMessageInputWithoutType(t *testing.T) {
+	req := openai.CreateResponseRequest{
+		Input: openai.RawJSON(`[
+			{"role":"user","content":[{"type":"input_text","text":"hi"}]}
+		]`),
+	}
+
+	got, err := convert.CreateResponseToMessage(req, nil, "claude-test")
+	if err != nil {
+		t.Fatalf("CreateResponseToMessage returned error: %v", err)
+	}
+
+	if len(got.Messages) != 1 || got.Messages[0].Role != "user" || len(got.Messages[0].Content) != 1 {
+		t.Fatalf("unexpected messages: %+v", got.Messages)
+	}
+	if got.Messages[0].Content[0].Type != "text" || got.Messages[0].Content[0].Text != "hi" {
+		t.Fatalf("message content not converted: %+v", got.Messages[0].Content)
+	}
+}
+
 func TestCreateResponseToMessageRejectsUnsupportedInputType(t *testing.T) {
 	req := openai.CreateResponseRequest{
 		Input: openai.RawJSON(`[{"type":"codex_future_item","value":true}]`),

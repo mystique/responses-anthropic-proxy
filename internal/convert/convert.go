@@ -238,7 +238,11 @@ func convertInput(raw openai.RawJSON, ctx Context) ([]anthropic.MessageParam, er
 		}
 	}
 	for _, item := range items {
-		switch item.Type {
+		itemType := item.Type
+		if itemType == "" && (item.Role != "" || item.Content != nil) {
+			itemType = "message"
+		}
+		switch itemType {
 		case "message":
 			flushAssistant()
 			flushUser()
