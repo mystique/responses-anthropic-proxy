@@ -68,11 +68,15 @@ http://127.0.0.1:8180/config
 
 If `config_password` is set in `rap.config.json`, the page requires that password before showing settings. If it is empty or omitted, the page opens without login. Saving writes `rap.config.json`; restart `rap` for saved changes to affect proxy behavior.
 
+The configuration page also exposes `/config/api` for the page's own JSON load/save flow. `GET /config/api` omits `config_password`; `POST /config/api` preserves the current password instead of accepting a replacement from the browser.
+
 Build the short command binary:
 
 ```sh
-go build -o rap ./cmd/rap
+./scripts/build-binary.sh
 ```
+
+The script writes the self-contained binary to `dist/rap` by default. Override the path with `OUTPUT=/path/to/rap ./scripts/build-binary.sh`.
 
 Defaults:
 
@@ -102,15 +106,23 @@ Implemented:
 - `POST /v1/responses/{response_id}/cancel` for queued/in-progress local records
 - Non-streaming and SSE streaming responses
 - Function tools and `tool_use` / `function_call_output` loops
+- Computer-use preview tools and `computer_call_output` screenshots
 - Web search tools via Anthropic server-side web search
+- Reasoning effort conversion to Anthropic thinking, including streamed reasoning events
+- `text.format` guidance for JSON object and JSON Schema output
+- String and array `stop` conversion
+- Image inputs from URL or data URL
+- Placeholder text for OpenAI file/document inputs that cannot be transferred directly
 - In-memory `previous_response_id` transcript continuation with 24 hour TTL
 - Tool-call ID compatibility between OpenAI Responses and Anthropic Messages
-- Detailed upstream error diagnostics for compatibility debugging
+- Detailed upstream and local compatibility error diagnostics
+- Allowlisted request metadata header forwarding to Anthropic
 
 Limitations:
 
 - Response retrieval, deletion, cancellation, and `previous_response_id` only work for records created in the current process.
 - Cancellation is local state mutation; completed Anthropic requests cannot be cancelled after the fact.
+- OpenAI file and document inputs are not uploaded or dereferenced; they are converted to explanatory text placeholders.
 - Unknown endpoints return OpenAI-style `404 not_found`; wrong methods return `405 method_not_allowed`.
 
 ## Implementation Details
@@ -169,6 +181,14 @@ Converted Anthropic user messages place all `tool_result` blocks before text or 
 
 Unsupported tool-result content types return a local `400 invalid_request_error`. This keeps schema incompatibilities visible at the proxy boundary instead of surfacing as less actionable Anthropic errors.
 
+`computer_call_output.output` supports `computer_screenshot` and `input_image` objects. Data URLs are converted to Anthropic base64 image blocks; URL images remain URL image blocks. A screenshot with only `file_id` becomes a text placeholder because this proxy does not fetch OpenAI file contents.
+
+### Tools And Reasoning
+
+Function and custom tools are sent as Anthropic client tools with JSON input schemas. `web_search` and `web_search_preview` map to Anthropic server-side web search, including `max_uses`, domain filters, and approximate user location. `computer_use_preview` maps to Anthropic computer use and adds the required `computer-use-2025-01-24` beta header.
+
+`tool_choice`, `parallel_tool_calls=false`, `reasoning.effort`, `stop`, and `text.format` are converted where Anthropic has a compatible representation. Forced tool choice is rejected with local `400 invalid_reasoning_tool_choice` when reasoning is enabled, because Anthropic thinking is incompatible with forced tool use.
+
 ### Streaming
 
 Streaming uses `internal/stream` to translate Anthropic SSE events into Responses stream events. The bridge also reconstructs the assistant transcript from streamed text and `tool_use` content blocks. After the stream completes, the server saves:
@@ -199,6 +219,12 @@ The log includes:
 The log intentionally does not include client `Authorization` headers or the Anthropic API key.
 
 Anthropic `invalid_request_error` responses are returned as local `400 invalid_request_error`. Network errors and upstream 5xx-style failures remain `502 upstream_error`.
+
+Local compatibility failures, such as unsupported input types, duplicate tool results, unknown models, or ambiguous tool-call IDs, return OpenAI-style `400` errors before any upstream call. These failures log `local_compatibility_error_context` with a store snapshot and resolved tool-call context to make client/proxy mismatches easier to debug.
+
+### Header Forwarding
+
+The proxy forwards only allowlisted metadata headers to Anthropic, such as `User-Agent`, `X-Request-ID`, tracing headers, and common forwarded client IP headers. It never forwards client `Authorization`; Anthropic authentication is always set from the configured upstream API key.
 
 ## Testing
 
